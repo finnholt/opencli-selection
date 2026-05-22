@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+
+# OpenCLI runtime artifacts
+.opencli-cache/
+dist/

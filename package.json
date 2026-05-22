@@ -1,0 +1,9 @@
+{
+  "name": "opencli-plugin-opencli-buyin",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "An opencli plugin: opencli-buyin",
+  "peerDependencies": {
+    "@jackwener/opencli": ">=1.8.0"
+  }
+}
