@@ -25,20 +25,14 @@ cli({
   site: 'buyin',
   name: 'products',
   access: 'read',
-  description: '百应选品库"为你推荐"商品列表(带价格、佣金、销量、店铺)',
+  description: '百应选品库"为你推荐"商品列表(商品名/售价/佣金率/月销/ID/封面图)',
   domain: 'buyin.jinritemai.com',
   strategy: Strategy.INTERCEPT,
   args: [
     { name: 'limit', type: 'int', default: 30, help: '想要的商品总数(每滚一次 +30)' },
     { name: 'wait', type: 'int', default: 4, help: '每次滚动后等响应的秒数' },
   ],
-  columns: [
-    'rank', 'product_id', 'name', 'price',
-    'commission_pct', 'commission_fee',
-    'month_sale', 'cooper_authors', 'good_ratio',
-    'category', 'shop', 'shop_score',
-    'detail_url',
-  ],
+  columns: ['name', 'price', 'commission_rate', 'month_sale', 'product_id', 'main_img', 'category'],
   func: async (page, args) => {
     const desired = Math.max(1, Number(args.limit) || ITEMS_PER_PAGE);
     const scrollsNeeded = Math.max(0, Math.ceil(desired / ITEMS_PER_PAGE) - 1);
@@ -110,31 +104,24 @@ cli({
       unique.push(it);
     }
 
-    return unique.slice(0, desired).map((item, i) => mapProduct(item, i + 1));
+    return unique.slice(0, desired).map(mapProduct);
   },
 });
 
-function mapProduct(item, rank) {
+function mapProduct(item) {
   const p = item.base_model?.product_info ?? {};
   const promo = item.base_model?.promotion_info ?? {};
   const market = item.base_model?.marketing_info ?? {};
-  const shop = item.base_model?.shop_info ?? {};
   const cos = promo.cos_info?.cos ?? {};
 
   return {
-    rank,
-    product_id: item.product_id ?? '',
     name: p.name ?? '',
     price: fenToYuan(market.price_desc?.price?.origin),
-    commission_pct: round1(cos.cos_ratio?.origin),
-    commission_fee: fenToYuan(cos.cos_fee?.origin),
+    commission_rate: round1(cos.cos_ratio?.origin),
     month_sale: p.month_sale?.origin ?? 0,
-    cooper_authors: promo.cooper_author_num?.origin ?? 0,
-    good_ratio: round1(p.good_ratio?.origin),
-    category: joinCategory(p.category),
-    shop: shop.shop_name ?? '',
-    shop_score: shop.shop_score_info?.shop_score?.score ?? 0,
-    detail_url: p.detail_url ?? '',
+    product_id: item.product_id ?? '',
+    main_img: p.main_img?.url_list?.[0] ?? '',
+    category: p.category ?? null,
   };
 }
 
@@ -146,14 +133,4 @@ function fenToYuan(fen) {
 function round1(n) {
   if (n == null) return 0;
   return Math.round(Number(n) * 10) / 10;
-}
-
-function joinCategory(cat) {
-  if (!cat) return '';
-  const names = [
-    cat.first_category?.category_name,
-    cat.second_category?.category_name,
-    cat.third_category?.category_name,
-  ].filter(Boolean);
-  return names.join(' > ');
 }
