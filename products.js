@@ -21,6 +21,17 @@ import {writeFileSync} from 'fs';
  *   200 条 ~25-40 分钟,极易触发风控,不建议
  *
  * 注意:批量带详情命中风控概率非高,默认节奏已尽量拟人,但**没有零风险方案**。
+ *
+ * 类目过滤(--category):
+ *   material_list 是 POST + a_bogus 签名,我们没法手写整个 body。但 INTERCEPT
+ *   已经 patch 过 window.fetch,所以在 installInterceptor **之前** 再插一层
+ *   body 改写器,只动 material_list 的 POST body,把 filters.{BusinessCid|MendelCid}
+ *   塞进去 —— 签名仍由浏览器算,不破坏。
+ *
+ *   id 短 (len < 7) → BusinessCid (cate_type=1 顶级,如 "5")
+ *   id 长 (len >=7) → MendelCid   (cate_type=3 子级,如 "1000003462")
+ *
+ *   多个 id 用逗号分隔;同 key 多值放进数组,跨 key 也支持叠加。
  */
 
 const LANDING_URL = 'https://buyin.jinritemai.com/dashboard';
@@ -47,6 +58,7 @@ cli({
         {name: 'jitter', type: 'int', default: 2000, help: '延迟的随机抖动 ms(拟人节奏)'},
         {name: 'pause_every', type: 'int', default: 5, help: '每 N 条插一次长停(0=关闭)'},
         {name: 'pause_ms', type: 'int', default: 8000, help: '长停的毫秒数'},
+        {name: 'category', default: '', help: '类目 id,多个用逗号分隔(短 id→顶级 BusinessCid,长 id→子级 MendelCid,自动识别)'},
     ],
     columns: [
         'promotion_id',
@@ -54,7 +66,6 @@ cli({
         'title',
         'category',
         'sales_num',
-        "media",
         'cover',
         'price',
         'old_price',
@@ -77,9 +88,23 @@ cli({
         const pauseEvery = Math.max(0, Number(args.pause_every) || 0);
         const pauseMs = Math.max(0, Number(args.pause_ms) || 0);
 
+        const categoryFilter = parseCategoryArg(args.category);
+        if (categoryFilter) {
+            process.stderr.write(
+                `[category] BusinessCid=${categoryFilter.businessIds.join(',') || '-'} ` +
+                `MendelCid=${categoryFilter.mendelIds.join(',') || '-'}\n`,
+            );
+        }
+
         // ─── 阶段 1: 进入选品库,抓 list + token ────────────────────────
         await page.goto(LANDING_URL);
         await page.wait(3);
+        if (categoryFilter) {
+            // 必须在 installInterceptor 之前,这样 interceptor 的 fetch patch
+            // 会叠在我们的 body 改写器之上,触发时:
+            //   React → interceptor 记录 → 我们改 body → 原生 fetch 签名发出
+            await installCategoryFilter(page, categoryFilter);
+        }
         await page.installInterceptor(PATTERN_LIST);
         await page.evaluate(`() => {
       window.history.pushState({}, '', ${JSON.stringify(LIST_PATH)});
@@ -92,6 +117,17 @@ cli({
                 'SPA 路由后没有捕获到 material_list。可能未登录或选品库对当前账号不可见。' +
                 '请在浏览器手动打开 https://buyin.jinritemai.com/dashboard/merch-picking-library 确认。',
             );
+        }
+
+        if (categoryFilter) {
+            const status = await readCategoryPatchStatus(page);
+            process.stderr.write(`[category] patch status: ${JSON.stringify(status)}\n`);
+            if (status && status.hits && status.hits.fetch === 0 && status.hits.xhr === 0) {
+                process.stderr.write(
+                    '[category] 警告:patch 没有命中任何 material_list 请求 —— ' +
+                    '类目过滤可能未生效,返回的还是默认池。\n',
+                );
+            }
         }
 
         const scrollsNeeded = Math.max(0, Math.ceil(desired / ITEMS_PER_PAGE) - 1);
@@ -267,6 +303,109 @@ cli({
 
 // ──────────────────────────────────────────────────────────────────
 
+function parseCategoryArg(raw) {
+    const s = String(raw ?? '').trim();
+    if (!s) return null;
+    const ids = s.split(/[,\s]+/).filter(Boolean);
+    if (ids.length === 0) return null;
+    const businessIds = [];
+    const mendelIds = [];
+    for (const id of ids) {
+        if (id.length >= 7) mendelIds.push(id);
+        else businessIds.push(id);
+    }
+    return { businessIds, mendelIds };
+}
+
+async function installCategoryFilter(page, filter) {
+    // 同时 patch fetch 和 XMLHttpRequest —— 百应的签名 SDK 大概率 hook XHR,
+    // 走 axios 默认 adapter 时不经过 window.fetch。
+    // 两层都装,谁中了算谁。命中后 window.__buyinCategoryHits 自增,便于排查。
+    const cfg = JSON.stringify(filter);
+    await page.evaluate(`() => {
+    window.__buyinCategoryFilter = ${cfg};
+    if (window.__buyinCategoryPatched) return;
+    window.__buyinCategoryPatched = true;
+    window.__buyinCategoryHits = { fetch: 0, xhr: 0, skipNonString: 0 };
+
+    const MATCH = 'selection/common/material_list';
+
+    function mutateBody(bodyStr) {
+      try {
+        const body = JSON.parse(bodyStr);
+        body.filters = body.filters || {};
+        const f = window.__buyinCategoryFilter || {};
+        if (f.businessIds && f.businessIds.length) {
+          body.filters.BusinessCid = { value: f.businessIds };
+        }
+        if (f.mendelIds && f.mendelIds.length) {
+          body.filters.MendelCid = { value: f.mendelIds };
+        }
+        return JSON.stringify(body);
+      } catch (_e) {
+        return null;
+      }
+    }
+
+    // ─── fetch ──────────────────────────────────────────────
+    const origFetch = window.fetch;
+    window.fetch = function(input, init) {
+      try {
+        const url = typeof input === 'string' ? input : (input && input.url) || '';
+        if (url.indexOf(MATCH) >= 0) {
+          if (init && typeof init.body === 'string') {
+            const mutated = mutateBody(init.body);
+            if (mutated) {
+              init.body = mutated;
+              window.__buyinCategoryHits.fetch++;
+            }
+          } else {
+            window.__buyinCategoryHits.skipNonString++;
+          }
+        }
+      } catch (_e) {}
+      return origFetch.call(this, input, init);
+    };
+
+    // ─── XMLHttpRequest ─────────────────────────────────────
+    const origOpen = XMLHttpRequest.prototype.open;
+    const origSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function(method, url) {
+      this.__buyinUrl = String(url || '');
+      return origOpen.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.send = function(body) {
+      try {
+        const url = this.__buyinUrl || '';
+        if (url.indexOf(MATCH) >= 0) {
+          if (typeof body === 'string') {
+            const mutated = mutateBody(body);
+            if (mutated) {
+              window.__buyinCategoryHits.xhr++;
+              return origSend.call(this, mutated);
+            }
+          } else {
+            window.__buyinCategoryHits.skipNonString++;
+          }
+        }
+      } catch (_e) {}
+      return origSend.call(this, body);
+    };
+  }`);
+}
+
+async function readCategoryPatchStatus(page) {
+    try {
+        return await page.evaluate(`() => ({
+      patched: !!window.__buyinCategoryPatched,
+      hits: window.__buyinCategoryHits || null,
+      filter: window.__buyinCategoryFilter || null,
+    })`);
+    } catch {
+        return null;
+    }
+}
+
 function dedupListItems(items) {
     const seen = new Set();
     const out = [];
@@ -333,7 +472,6 @@ function buildRow(listItem, productNode, promotion, productId, detailOk) {
         product_id: productId || String(listItem?.product_id ?? ''),
         promotion_id:String(listItem?.promotion_id ?? ''),
         title: '',
-        media: null,
         category,  // 分类
         month_sale:month_sale, // 月销
         sales_num:0, // 已售
@@ -365,7 +503,6 @@ function buildRow(listItem, productNode, promotion, productId, detailOk) {
     // const calc = promotion?.promotion_data?.calculate_data ?? {};
 
     row.title = base.title ?? '';
-    row.media = base.media ?? null;
     row.cover = base.cover ?? '';
     row.detail_url = base.detail_url ?? '';
     row.images = base.images ?? [];

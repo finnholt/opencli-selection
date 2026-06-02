@@ -62,7 +62,14 @@ opencli buyin products --limit 90 -f csv -o ~/buyin-products.csv
 
 # 给脚本管道用
 opencli buyin products --limit 30 -f json | jq '.[] | select(.commission_rate >= 20)'
+
+# 按类目过滤(id 从 categories 命令拿)
+opencli buyin products --category 5                       # 顶级"美妆"(BusinessCid)
+opencli buyin products --category 1000003462              # 子级长 id(MendelCid)
+opencli buyin products --category 5,1000003462            # 多个一起传(短/长自动分发)
 ```
+
+`--category` 接受 id(逗号分隔多个):短 id(<7 位,如 `"5"`)走顶级 `BusinessCid`,长 id(≥7 位,如 `"1000003462"`)走子级 `MendelCid`,**自动识别**。先跑 `opencli buyin categories -f json` 拿 id。
 
 #### 输出列(7 个)
 
@@ -159,7 +166,7 @@ opencli buyin categories --flat -f csv -o ~/buyin-cate-tree.csv
 | 限制 | 原因 |
 |---|---|
 | 必须本机 Chrome 登录,无法服务器 headless 直跑 | 百应 a_bogus 签名靠浏览器自家 JS hook |
-| 商品列表只能拉"为你推荐"池,无法按类目筛 | 当前 INTERCEPT 模式被动接收,未做主动 POST body 构造 |
+| 商品列表暂不支持 `search_text` / 销量区间等其他筛选 | 仅在 body 改写器里塞了 `filters.{BusinessCid,MendelCid}`,其余维度按需再加 |
 | `--limit 300+` 会很慢,且可能触发风控 | 每 30 条要滚 1 次,~3 秒/页 |
 | `product` 详情每次都要先发列表拿 token | 接口强制要求 search_id/session_id,5~30 分钟内有效 |
 | 老 promotion_id 可能返回空字段 | 商家已下架/换推广周期 |
