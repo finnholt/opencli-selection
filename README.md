@@ -8,8 +8,7 @@ OpenCLI 插件 —— 抖音百应(选品广场)商家侧数据采集。
 
 | 命令 | 数据 | 策略 | 输出形态 |
 |---|---|---|---|
-| `opencli buyin products` | 选品库"为你推荐"商品列表(可滚动分页) | INTERCEPT | 多行,每行 1 个商品 |
-| `opencli buyin product <id>` | 单个商品的完整详情(基础/佣金/视频/大图/亮点话术) | INTERCEPT(两阶段) | 单行,17 个字段 |
+| `opencli buyin products` | 选品库"为你推荐"商品列表(可滚动分页,可类目筛选,默认带完整详情) | INTERCEPT(批量两阶段) | 多行,每行 1 个商品 |
 | `opencli buyin categories` | 选品库类目树(顶级 17 项 + 每个顶级下的子级) | COOKIE | 树形 / 拍平 |
 
 所有命令都默认 `-f table`,加 `-f json/csv/markdown/yaml` 切换输出格式。
@@ -85,51 +84,6 @@ opencli buyin products --category 5,1000003462            # 多个一起传(短/
 
 `category` 在 table 视图显示为 `[object Object]`,要看完整嵌套用 `-f json`。
 
-### 商品详情
-
-```bash
-# 从 products 拿到 product_id 后查详情
-opencli buyin product 3698435191010885821 --promotion 3698438561134163727
-
-# 显式传 session token(跳过列表抓取,适合调试)
-opencli buyin product 3698435191010885821 \
-  --promotion 3698438561134163727 \
-  --search_id "<160 字符>" \
-  --session_id "<160 字符>" \
-  --log_pb "<时间戳形态>"
-```
-
-#### 工作原理(两阶段)
-
-1. **阶段 1**:进 `/dashboard` → SPA 切到 `/merch-picking-library` → 捕获 `material_list` 响应,从 `data.extra` 拿 `search_id` / `session_id` / `log_pb`
-2. **阶段 2**:SPA 切到 `/merch-promoting?commodity_id=...&product_id=...&search_id=...&session_id=...&log_pb=...` → 捕获 `pack_detail` 响应
-
-百应详情接口强制要求 session token,**不能裸调**(会返 `-1025`)。
-
-#### 输出列(17 个)
-
-| 列 | 来源 | 说明 |
-|---|---|---|
-| `product_id` | 入参 | — |
-| `name` | `product_base.title` | 商品名 |
-| `cover` | `product_base.cover` | 主图 |
-| `video_url` | `product_base.media.video_url` | **带签名的临时链接,几小时失效** |
-| `commission_rate` | `product_cos.cos_label.cos.cos_ratio` | 佣金率 % |
-| `commission_fee` | `product_cos.cos_label.cos.cos_fee` | 佣金金额(元,分→元) |
-| `commission_type` | `product_cos.cos_label.cos_ratio_text` | "团长" / "标准" |
-| `good_ratio` | `product_comment.good_ratio` | 好评率 % |
-| `fans_match_score` | `product_fans_match.fans_match.score` | 粉丝匹配度 0~100 |
-| `fans_match_level` | `product_fans_match.fans_match.level` | 匹配等级 1~5 |
-| `high_light` | `product_base.high_light` | **商家亮点话术**(常含微信号/手机号) |
-| `detail_url` | `product_base.detail_url` | haohuo 消费侧详情页 |
-| `images` | `product_base.images` | 营销图数组 |
-| `big_imgs` | `product_base.big_imgs` | 详情大图数组 |
-| `is_sui_xin_tui` | — | 支持随心推 |
-| `is_in_window` | — | 已加橱窗 |
-| `is_in_cart` | — | 已加选品车 |
-
-`pack_detail` 响应里还有 `model.author_data`(合作达人列表)/ `model.hot_content_data`(热门带货视频)/ `model.shop_product_data`(同店其他商品)等板块,当前未映射,以后可扩。
-
 ### 类目树
 
 ```bash
@@ -199,8 +153,7 @@ opencli plugin uninstall opencli-buyin
 opencli-buyin/
 ├── _shared/
 │   └── browser-fetch.js     # 同源 fetch 工具(借浏览器签名)
-├── products.js              # 商品列表(INTERCEPT)
-├── product.js               # 商品详情(INTERCEPT,两阶段)
+├── products.js              # 商品列表 + 批量详情(INTERCEPT)
 ├── categories.js            # 类目树(COOKIE)
 ├── opencli-plugin.json      # 插件元信息
 └── package.json
@@ -216,7 +169,7 @@ opencli-buyin/
    - 因此用 `history.pushState + popstate` 在不刷新前提下切路由
 3. **session token 两阶段**
    - `material_list` 响应里的 `data.extra.search_id` / `session_id` / `data.log_id` 是详情接口的鉴权前提
-   - 显式传 `--search_id/--session_id/--log_pb` 可跳过阶段 1(批量查询时复用 token)
+   - 批量循环里每 ~25 条主动 SPA 回列表刷一次 token,规避 5~30 分钟的 session 过期
 
 ## License
 

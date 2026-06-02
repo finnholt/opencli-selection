@@ -255,13 +255,18 @@ cli({
                 process.stderr.write(`  → dump 失败: ${e?.message ?? e}\n`);
             }
 
-            const productHit = newCaps.find((c) => c?.data?.model?.product?.product_base);
-            const promotionHit = newCaps.find((c) => c?.data?.model?.promotion_data?.calculate_data);
+            // 不用 newCaps slice —— buffer 游标会被 installInterceptor 切 pattern 时的
+            // 清空时机错位(偶数项 before=1 漏一条)。直接在 allCaps 里按响应自带的
+            // data.product_id 匹配当前 productId,稳。
+            //   - 完整版:含 product_base
+            //   - 轻量版:只有 product_risk_tip,但 promotion_data 往往在轻量版里
+            const matched = allCaps.filter((c) => String(c?.data?.product_id ?? '') === productId);
+            const productHit = matched.find((c) => c?.data?.model?.product?.product_base);
+            const promotionHit = matched.find((c) => c?.data?.model?.promotion_data?.calculate_data);
 
-            // 调试日志:每条商品的 capture 数 + 是否命中
             process.stderr.write(
                 `[item ${i + 1}/${targets.length}] pid=${productId} ` +
-                `newCaps=${newCaps.length} ` +
+                `allCaps=${allCaps.length} matchedByPid=${matched.length} ` +
                 `hitProduct=${!!productHit} hitPromo=${!!promotionHit} ` +
                 `productKeys=${productHit ? Object.keys(productHit.data?.model?.product ?? {}).join('|') : '-'}\n`
             );
@@ -528,9 +533,3 @@ function buildRow(listItem, productNode, promotion, productId, detailOk) {
     return row;
 }
 
-function parseRatio(v) {
-    if (v == null) return 0;
-    const num = typeof v === 'string' ? parseFloat(v) : Number(v);
-    if (!Number.isFinite(num)) return 0;
-    return Math.round(num * 10) / 10;
-}

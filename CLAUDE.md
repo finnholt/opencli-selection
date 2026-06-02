@@ -15,7 +15,6 @@
 | 文件 | 命令 | 策略 | 干啥 |
 |---|---|---|---|
 | `products.js` | `opencli buyin products` | INTERCEPT(批量两阶段) | 选品库商品列表**默认带完整详情**(逐条 pack_detail,慢) |
-| `product.js` | `opencli buyin product <id>` | INTERCEPT(两阶段) | 拉单个商品的完整详情 |
 | `categories.js` | `opencli buyin categories` | COOKIE | 拉选品库类目树(3 层) |
 
 ## 关键架构决策
@@ -52,7 +51,7 @@ await page.waitForCapture(10);
 
 跨命令复用这套套路。
 
-### 3. pack_detail 两阶段(`product.js` 核心)
+### 3. pack_detail 两阶段(products 批量详情核心)
 
 百应详情接口**强制要求 session token**,裸调返回 `-1025 "请求失败"`。
 
@@ -68,8 +67,6 @@ await page.waitForCapture(10);
   └→ 录响应,等 5s 让"完整版"也回来(有时分两次发:轻量探测 + 完整详情)
   └→ find 时必须用 `c?.data?.model?.product?.product_base`,跳过只有 risk_tip 的轻量响应
 ```
-
-`product.js` 支持 `--search_id` / `--session_id` / `--log_pb` 显式传入,跳过阶段 1(批量查询时复用 token)。
 
 ### 3.5 `products.js` 批量带详情(新)
 
@@ -88,7 +85,7 @@ await page.waitForCapture(10);
 
 **90 条商品大约 10-15 分钟,且**触发风控概率仍不低(滑块/冷却),没有零风险方案。**仅在后端真的需要详情时用**;只需要 list 字段时直接看 `mergeListAndDetail` 里 list 来源那几个字段就够,或者跑一条 `--limit 30` 取首批。
 
-捕获去重:逐条记录 `processedIdx`,每次只看新增的 captures,按内容(`product_base` / `calculate_data` 存在性)而非 URL 匹配响应。
+捕获匹配:**按响应自带的 `data.product_id` 在全量 captures 里直接定位**当前商品的响应,不依赖 buffer 游标(切 pattern 时清空时机会跟 processedIdx 错位,曾导致偶数项漏完整版)。匹配后再按内容挑:完整版找 `product_base`,promotion 数据找 `promotion_data.calculate_data`。
 
 ### 4. 字段映射约定
 
@@ -107,7 +104,7 @@ await page.waitForCapture(10);
 - 错误码识别(401/403/-1025 等)
 - 抛 `AuthRequiredError` / `CommandExecutionError`
 
-`categories.js` 等 COOKIE 策略命令用它。`products.js` / `product.js` 走 INTERCEPT,**不用**这个 helper。
+`categories.js` 等 COOKIE 策略命令用它。`products.js` 走 INTERCEPT,**不用**这个 helper。
 
 ## 已知的百应 API 表
 
@@ -183,7 +180,7 @@ opencli plugin install file:///Users/tengxinde/Documents/Projects/Vue/opencli-bu
 - **正常用法**:每小时跑几次,自用,**无风险**
 - **会触发风控**:每分钟级别 + 24×7 + 高并发 → 滑块、IP 限速、账号封禁
 - **session token 寿命**:估计 **5~30 分钟**(无官方文档,经验值)
-- **联系方式字段已删除**(`high_light` / `sec_shop_mobile` / `sec_shop_wechat_id`,2026-06-01) —— 合规考虑,数据里**不再包含**商家私人微信/手机。如有补回需求,改 `products.js` / `product.js` 的 columns 和 mapping 即可,但**先确认合规边界**
+- **联系方式字段已删除**(`high_light` / `sec_shop_mobile` / `sec_shop_wechat_id`,2026-06-01) —— 合规考虑,数据里**不再包含**商家私人微信/手机。如有补回需求,改 `products.js` 的 columns 和 mapping 即可,但**先确认合规边界**
 - 百应 ToS **明面禁止**任何爬取,自用低频不被找麻烦,但**别期待法律保护**
 
 ## 服务器部署
@@ -203,7 +200,6 @@ opencli-buyin/
 ├── _shared/
 │   └── browser-fetch.js     # 同源 fetch + 错误处理
 ├── products.js              # INTERCEPT 商品列表(默认带批量详情,见 §3.5)
-├── product.js               # INTERCEPT 两阶段单条详情
 ├── categories.js            # COOKIE 类目树
 ├── opencli-plugin.json      # 插件 manifest(name/version/opencli range)
 ├── package.json             # peerDep: @jackwener/opencli
