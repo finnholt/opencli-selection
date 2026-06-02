@@ -10,9 +10,13 @@ import { browserFetch } from './_shared/browser-fetch.js';
  *       &cate_type=1                         → 一级类目(17 项,短 ID)
  *       &cate_type=3&parent_id=<id>          → 该一级下的子级(长 ID)
  *
- *   选品广场类目树只有两层:
- *     - 顶级 (cate_type=1)
- *     - 选品分组 (cate_type=3)
+ *   选品广场类目树有三层:
+ *     - Level 1 顶级 (cate_type=1, 短 id 如 "5") —— 来自 cate_type=1 的响应,扁平无 childs
+ *     - Level 2 选品大类 (cate_type=3, 长 id) —— 来自 cate_type=3&parent_id=<level1> 的响应
+ *     - Level 3 选品细类 (cate_type=3, 长 id) —— **API 把它 nested 在 level-2 的 childs 字段里直接返回**
+ *
+ *   也就是说,拉一次 cate_type=3&parent_id=<top> 就能拿到 level-2 + level-3 整棵子树,
+ *   不需要为每个 level-2 再发一次请求。
  *
  * 默认行为:返回 17 个顶级,每行附带 childs 字段(该顶级下的所有子级)。
  * --parent 指定父级 id:只返该父级下的子级,不再嵌套。
@@ -32,7 +36,7 @@ cli({
   args: [
     { name: 'parent', help: '上级类目 id(填了只拉该父级下的子级)' },
     { name: 'flat', type: 'bool', default: false, help: '把树拍平,每行带 parent_id / parent_name' },
-    { name: 'sleep', type: 'int', default: 200, help: '抓子级时每次请求之间的延迟 ms(防风控)' },
+    { name: 'sleep', type: 'int', default: 500, help: '抓子级时每次请求之间的延迟 ms(防风控)' },
   ],
   columns: ['id', 'name', 'cate_type', 'parent_id', 'parent_name', 'childs'],
   func: async (page, args) => {
@@ -74,6 +78,7 @@ cli({
           id: s.id,
           name: s.name,
           cate_type: s.cate_type,
+          childs: s.childs ?? s.children ?? s.sub_cate_info ?? [],
         }));
       } catch {
         // 某个顶级拉子级失败就跳过,不让单点故障毁掉整棵树
@@ -82,8 +87,6 @@ cli({
         id: t.id,
         name: t.name,
         cate_type: t.cate_type,
-        parent_id: '',
-        parent_name: '',
         childs,
       });
       if (sleepMs > 0) await page.wait(sleepMs / 1000);
