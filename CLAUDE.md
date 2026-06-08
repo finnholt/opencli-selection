@@ -74,14 +74,34 @@ await page.waitForCapture(10);
 
 ```
 阶段 1:scroll material_list 凑齐 desired 条 → 收集 product_id + 取最新 token
-阶段 2:逐条 SPA 到 /merch-promoting?... → 抓 pack_detail
-        - 每 25 条 SPA 回列表刷一次 token(规避 session 过期)
+阶段 2:逐条 [中转页] → SPA 到 /merch-promoting?... → 抓 pack_detail
+        - 每条先 SPA 跳「违规中心」中转页做路由重置(见下),再跳详情
+        - 每 25 条 SPA 回选品库刷一次 token(refreshTokens,规避 session 过期)
         - 每条间隔 delay (默认 4s) + 随机 jitter (默认 2s)
         - 每 N=5 条插一个长停顿(默认 8s)
         - 失败条目只保留 list 字段,detail_ok=false,不中断整批
 ```
 
-参数:`--delay <ms>` / `--jitter <ms>` / `--pause_every <n>` / `--pause_ms <ms>`。
+**逐条「路由重置」中转页(2026-06-08 优化)**:详情路由 `/merch-promoting?productId=X`
+只变 query 不变 pathname,React Router 当成同一路由 → 详情组件不 remount → 不重发 pack_detail。
+所以每条详情前必须先跳一个 **不同 pathname** 的路由把详情组件卸载掉。
+
+- 中转页 = `/dashboard/content/author-violation`(`INTERIM_PATH`),**裸路径即可**,
+  `universal_page_params_id` 由 React 自动补;走 governance 接口面,**完全不碰 material_list**,
+  不给选品广场风控加计数(旧版用"回选品库",每条多发一个带签名的 material_list POST)。
+- 确认信号 = 轮询 DOM 等 `h1/h2/h3` 出现「违规中心」(`INTERIM_MOUNT_TEXT`,`waitForInterimMount`),
+  抗缓存、比等请求快;**await 它** = 防止连续两次 pushState 被 React 合并、跳过中转那步。
+- ⚠️ 只有逐条的路由重置改了;**token 刷新仍走选品库**(material_list 才有 search_id/session_id)。
+
+参数:`--delay <ms>` / `--jitter <ms>` / `--pause_every <n>` / `--pause_ms <ms>` / `--interim_dwell <ms>`(中转页停留,拟人,默认 1500)。
+
+**筛选参数**(都走 `installFilters` 改写 material_list 的 POST body,可叠加):
+- `--category <ids>`:类目(短 id→BusinessCid 顶级 / 长 id→MendelCid 子级)
+- `--sales <区间>`:月销 `alliance_sales_30d`,如 `R:5000,-`(≥5000)
+- `--price <区间>`:售价 `Price`(单位**元**),如 `R:50,100`
+- `--commission <区间>`:佣金率 `CosRatio`(**百分比**),如 `R:40,50`
+
+区间值**整段传、不 split**(`R:min,max` 自带逗号;`-` 表示不限),原样包成 `{ value: [<raw>] }`。
 
 **90 条商品大约 10-15 分钟,且**触发风控概率仍不低(滑块/冷却),没有零风险方案。**仅在后端真的需要详情时用**;只需要 list 字段时直接看 `mergeListAndDetail` 里 list 来源那几个字段就够,或者跑一条 `--limit 30` 取首批。
 

@@ -31,11 +31,25 @@ import {CommandExecutionError, EmptyResultError} from '@jackwener/opencli/errors
  *   id 长 (len >=7) → MendelCid   (cate_type=3 子级,如 "1000003462")
  *
  *   多个 id 用逗号分隔;同 key 多值放进数组,跨 key 也支持叠加。
+ *
+ * 区间过滤(--sales / --price / --commission):
+ *   走同一套 body 改写。值由用户整段传区间字符串(如 R:5000,- / R:50,100),
+ *   **不做 split**(区间格式自带逗号),原样包成 filters[key] = { value: [<raw>] }。
+ *     --sales      → alliance_sales_30d  月销
+ *     --price      → Price               售价(单位元,跟 UI 一致,非分)
+ *     --commission → CosRatio            佣金率(百分比,如 40 = 40%)
+ *   可与 --category 叠加。
  */
 
 const LANDING_URL = 'https://buyin.jinritemai.com/dashboard';
 const LIST_PATH = '/dashboard/merch-picking-library';
 const DETAIL_PATH = '/dashboard/merch-picking-library/merch-promoting';
+// 逐条详情之间的「路由重置」中转页。详情路由只变 query 不变 pathname,React Router
+// 当成同一路由 → 详情组件不 remount → 不重发 pack_detail。必须先跳到一个不同 pathname
+// 的路由把详情组件卸载掉。用「违规中心」而非选品库:它走 governance 接口面,完全不碰
+// material_list,不给选品广场风控加计数。裸路径即可,universal_page_params_id 由 React 自动补。
+const INTERIM_PATH = '/dashboard/content/author-violation';
+const INTERIM_MOUNT_TEXT = '违规中心'; // 中转页 mount 完成的 DOM 信号(抗缓存,且 await 它防 React 合并 pushState)
 
 const PATTERN_LIST = 'selection/common/material_list';
 const PATTERN_DETAIL = 'selection/decision/pack_detail';
@@ -57,11 +71,15 @@ cli({
         {name: 'jitter', type: 'int', default: 2000, help: '延迟的随机抖动 ms(拟人节奏)'},
         {name: 'pause_every', type: 'int', default: 5, help: '每 N 条插一次长停(0=关闭)'},
         {name: 'pause_ms', type: 'int', default: 8000, help: '长停的毫秒数'},
+        {name: 'interim_dwell', type: 'int', default: 3000, help: '中转页(违规中心)mount 后停留 ms(拟人浏览,跳详情前)'},
         {
             name: 'category',
             default: '',
             help: '类目 id,多个用逗号分隔(短 id→顶级 BusinessCid,长 id→子级 MendelCid,自动识别)'
         },
+        {name: 'sales', default: '', help: '月销筛选(alliance_sales_30d),整段区间值,如 R:5000,-(≥5000)'},
+        {name: 'price', default: '', help: '售价筛选(Price,单位元),整段区间值,如 R:50,100'},
+        {name: 'commission', default: '', help: '佣金率筛选(CosRatio,百分比),整段区间值,如 R:40,50'},
     ],
     columns: [
         'promotion_id',
@@ -93,23 +111,21 @@ cli({
         const jitterMs = Math.max(0, Number(args.jitter) || 2000);
         const pauseEvery = Math.max(0, Number(args.pause_every) || 0);
         const pauseMs = Math.max(0, Number(args.pause_ms) || 0);
+        const interimDwellMs = Math.max(0, Number(args.interim_dwell) || 0);
 
-        const categoryFilter = parseCategoryArg(args.category);
-        if (categoryFilter) {
-            process.stderr.write(
-                `[category] BusinessCid=${categoryFilter.businessIds.join(',') || '-'} ` +
-                `MendelCid=${categoryFilter.mendelIds.join(',') || '-'}\n`,
-            );
+        const filterSpec = buildFilterSpec(args);
+        if (filterSpec) {
+            process.stderr.write(`[filter] ${describeFilterSpec(filterSpec)}\n`);
         }
 
         // ─── 阶段 1: 进入选品库,抓 list + token ────────────────────────
         await page.goto(LANDING_URL);
         await page.wait(3);
-        if (categoryFilter) {
+        if (filterSpec) {
             // 必须在 installInterceptor 之前,这样 interceptor 的 fetch patch
             // 会叠在我们的 body 改写器之上,触发时:
             //   React → interceptor 记录 → 我们改 body → 原生 fetch 签名发出
-            await installCategoryFilter(page, categoryFilter);
+            await installFilters(page, filterSpec);
         }
         await page.installInterceptor(PATTERN_LIST);
         await page.evaluate(`() => {
@@ -125,13 +141,13 @@ cli({
             );
         }
 
-        if (categoryFilter) {
-            const status = await readCategoryPatchStatus(page);
-            process.stderr.write(`[category] patch status: ${JSON.stringify(status)}\n`);
+        if (filterSpec) {
+            const status = await readFilterPatchStatus(page);
+            process.stderr.write(`[filter] patch status: ${JSON.stringify(status)}\n`);
             if (status && status.hits && status.hits.fetch === 0 && status.hits.xhr === 0) {
                 process.stderr.write(
-                    '[category] 警告:patch 没有命中任何 material_list 请求 —— ' +
-                    '类目过滤可能未生效,返回的还是默认池。\n',
+                    '[filter] 警告:patch 没有命中任何 material_list 请求 —— ' +
+                    '筛选可能未生效,返回的还是默认池。\n',
                 );
             }
         }
@@ -187,26 +203,33 @@ cli({
                 processedIdx = (await page.getInterceptedRequests()).length;
             }
 
-            // 触发 detail —— 方案 1+(强同步版):
-            //   1. 切 interceptor 到 list pattern
-            //   2. SPA 回列表,**等真实的 material_list 响应**(确认 React Router 真的处理完了)
-            //   3. 切回 detail pattern,推进游标跳过 list 响应
+            // 触发 detail —— 方案 2(轻量中转 + DOM 确认版):
+            //   1. SPA 跳「违规中心」中转页(pathname 变 → React 卸载详情组件)
+            //   2. 轮询等「违规中心」DOM 出现(确认 React Router 真的 mount 了中转页;
+            //      await 它 = 防止连续两次 pushState 被 React 合并,跳过中转那步)
+            //   3. 切 detail pattern,推进游标
             //   4. SPA 到详情,等 pack_detail
             //
-            // 单纯 setTimeout 等不可靠,因为 React Router 可能把连续两次 pushState 合并处理,
-            // 直接跳过"去列表"那步。等真实 list 响应 = 强制 React Router 走完"挂载列表"流程。
+            // 旧版用「回选品库 + 等 material_list 响应」当确认信号,代价是每条多发一个带签名的
+            // material_list POST(给选品广场风控加计数)。违规中心走 governance 接口面,不碰
+            // material_list,且 DOM 信号比等请求更快、抗缓存。token 刷新仍走选品库(见 refreshTokens)。
             const detailUrl = buildDetailUrl(productId, productId, tokens);
 
-            await page.installInterceptor(PATTERN_LIST);
             await page.evaluate(`() => {
-        window.history.pushState({}, '', ${JSON.stringify(LIST_PATH)});
+        window.history.pushState({}, '', ${JSON.stringify(INTERIM_PATH)});
         window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
       }`);
-            try {
-                await page.waitForCapture(waitSecs);
-            } catch {
-                // 没等到也继续,但 stderr 标记一下
-                process.stderr.write(`[warn] item ${i + 1}: 列表 material_list 没捕获到,继续\n`);
+            const interimReady = await waitForInterimMount(page, waitSecs);
+            if (!interimReady) {
+                // 没确认到中转页 mount,继续(下一步详情 pushState 仍可能成功),但标记一下
+                process.stderr.write(`[warn] item ${i + 1}: 中转页(${INTERIM_MOUNT_TEXT})未确认 mount,继续\n`);
+            }
+
+            // 在中转页停留一会儿再跳详情 —— 拟人浏览节奏,避免"瞬切"指纹。
+            // 复用 jitter 做随机抖动,停留区间 [interimDwell, interimDwell+jitter]。
+            if (interimDwellMs > 0) {
+                const dwell = interimDwellMs + (jitterMs > 0 ? Math.random() * jitterMs : 0);
+                await page.wait(dwell / 1000);
             }
 
             await page.installInterceptor(PATTERN_DETAIL);
@@ -276,7 +299,9 @@ cli({
 
             if (step1?.ok) {
                 // Step 2: 等 React 处理 tab 切换
-                await page.wait(0.6);
+                //   原来固定 0.6s —— 太快且零抖动,是最像脚本的一段。
+                //   加大到 1.5~2.5s 随机,打散规律节奏(拟人,缓解限流指纹)。
+                await page.wait(1.5 + Math.random());
 
                 // Step 3: 点"受众数据"tab(同样在同一个 tablist 里找)
                 audienceClickResult = await page.evaluate(`() => {
@@ -300,7 +325,10 @@ cli({
                     await page.waitForCapture(waitSecs);
                 } catch {
                 }
-                await page.wait(1.5);
+                // 受众 pack_detail 抓完 → 点带货内容前的间隔。这是一条里两次 pack_detail
+                // 挨最近的地方,原来固定 1.5s 太突发。加大到 3~4.5s 随机,把 pack_detail
+                // 速率摊开(缓解 11001 限流)。
+                await page.wait(3 + Math.random() * 1.5);
             }
 
             // 追加点"带货内容"tab:
@@ -327,7 +355,8 @@ cli({
                         await page.waitForCapture(waitSecs);
                     } catch {
                     }
-                    await page.wait(1.5);
+                    // 带货内容 pack_detail 抓完 → 进条目间 delay 前的间隔。加大到 2.5~4s 随机。
+                    await page.wait(2.5 + Math.random() * 1.5);
                 }
             }
 
@@ -398,16 +427,45 @@ function parseCategoryArg(raw) {
     return {businessIds, mendelIds};
 }
 
-async function installCategoryFilter(page, filter) {
+// 区间维度的 filter key —— 值由用户整段传(如 R:5000,-),**不做 split**(区间格式自带逗号)。
+const RANGE_FILTER_KEYS = {
+    sales: 'alliance_sales_30d', // 月销
+    price: 'Price',              // 售价(单位元)
+    commission: 'CosRatio',      // 佣金率(百分比)
+};
+
+// 把 --category + --sales/--price/--commission 合成一份 filter spec(都没传则返回 null)。
+function buildFilterSpec(args) {
+    const cat = parseCategoryArg(args.category) || {businessIds: [], mendelIds: []};
+    const ranges = {};
+    for (const [argName, filterKey] of Object.entries(RANGE_FILTER_KEYS)) {
+        const raw = String(args[argName] ?? '').trim();
+        if (raw) ranges[filterKey] = raw; // 整段原样,不 split
+    }
+    const hasCat = cat.businessIds.length > 0 || cat.mendelIds.length > 0;
+    const hasRanges = Object.keys(ranges).length > 0;
+    if (!hasCat && !hasRanges) return null;
+    return {businessIds: cat.businessIds, mendelIds: cat.mendelIds, ranges};
+}
+
+function describeFilterSpec(spec) {
+    const parts = [];
+    if (spec.businessIds.length) parts.push(`BusinessCid=${spec.businessIds.join(',')}`);
+    if (spec.mendelIds.length) parts.push(`MendelCid=${spec.mendelIds.join(',')}`);
+    for (const [k, v] of Object.entries(spec.ranges)) parts.push(`${k}=${v}`);
+    return parts.join(' ') || '(空)';
+}
+
+async function installFilters(page, filter) {
     // 同时 patch fetch 和 XMLHttpRequest —— 百应的签名 SDK 大概率 hook XHR,
     // 走 axios 默认 adapter 时不经过 window.fetch。
-    // 两层都装,谁中了算谁。命中后 window.__buyinCategoryHits 自增,便于排查。
+    // 两层都装,谁中了算谁。命中后 window.__buyinFilterHits 自增,便于排查。
     const cfg = JSON.stringify(filter);
     await page.evaluate(`() => {
-    window.__buyinCategoryFilter = ${cfg};
-    if (window.__buyinCategoryPatched) return;
-    window.__buyinCategoryPatched = true;
-    window.__buyinCategoryHits = { fetch: 0, xhr: 0, skipNonString: 0 };
+    window.__buyinFilters = ${cfg};
+    if (window.__buyinFiltersPatched) return;
+    window.__buyinFiltersPatched = true;
+    window.__buyinFilterHits = { fetch: 0, xhr: 0, skipNonString: 0 };
 
     const MATCH = 'selection/common/material_list';
 
@@ -415,12 +473,17 @@ async function installCategoryFilter(page, filter) {
       try {
         const body = JSON.parse(bodyStr);
         body.filters = body.filters || {};
-        const f = window.__buyinCategoryFilter || {};
+        const f = window.__buyinFilters || {};
         if (f.businessIds && f.businessIds.length) {
           body.filters.BusinessCid = { value: f.businessIds };
         }
         if (f.mendelIds && f.mendelIds.length) {
           body.filters.MendelCid = { value: f.mendelIds };
+        }
+        // 区间维度:每个 key 整段值包成 { value: [<raw>] },如 { value: ['R:5000,-'] }
+        const ranges = f.ranges || {};
+        for (const k in ranges) {
+          body.filters[k] = { value: [ranges[k]] };
         }
         return JSON.stringify(body);
       } catch (_e) {
@@ -438,10 +501,10 @@ async function installCategoryFilter(page, filter) {
             const mutated = mutateBody(init.body);
             if (mutated) {
               init.body = mutated;
-              window.__buyinCategoryHits.fetch++;
+              window.__buyinFilterHits.fetch++;
             }
           } else {
-            window.__buyinCategoryHits.skipNonString++;
+            window.__buyinFilterHits.skipNonString++;
           }
         }
       } catch (_e) {}
@@ -462,11 +525,11 @@ async function installCategoryFilter(page, filter) {
           if (typeof body === 'string') {
             const mutated = mutateBody(body);
             if (mutated) {
-              window.__buyinCategoryHits.xhr++;
+              window.__buyinFilterHits.xhr++;
               return origSend.call(this, mutated);
             }
           } else {
-            window.__buyinCategoryHits.skipNonString++;
+            window.__buyinFilterHits.skipNonString++;
           }
         }
       } catch (_e) {}
@@ -475,12 +538,12 @@ async function installCategoryFilter(page, filter) {
   }`);
 }
 
-async function readCategoryPatchStatus(page) {
+async function readFilterPatchStatus(page) {
     try {
         return await page.evaluate(`() => ({
-      patched: !!window.__buyinCategoryPatched,
-      hits: window.__buyinCategoryHits || null,
-      filter: window.__buyinCategoryFilter || null,
+      patched: !!window.__buyinFiltersPatched,
+      hits: window.__buyinFilterHits || null,
+      filter: window.__buyinFilters || null,
     })`);
     } catch {
         return null;
@@ -513,6 +576,21 @@ function extractLatestTokens(captures) {
         }
     }
     return null;
+}
+
+// 轮询等中转页(违规中心)mount 完成。比 waitForCapture 快、抗缓存,且 await 它能确保
+// React Router 真的把中转路由 commit 了,从而保证下一步详情 pushState 不被合并跳过。
+async function waitForInterimMount(page, maxSecs) {
+    const deadline = Date.now() + Math.max(2, maxSecs) * 1000;
+    while (Date.now() < deadline) {
+        const ok = await page.evaluate(`() => {
+      const t = ${JSON.stringify(INTERIM_MOUNT_TEXT)};
+      return [...document.querySelectorAll('h1,h2,h3')].some((h) => (h.textContent || '').includes(t));
+    }`);
+        if (ok) return true;
+        await page.wait(0.3);
+    }
+    return false;
 }
 
 async function refreshTokens(page, waitSecs) {
