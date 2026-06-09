@@ -70,8 +70,9 @@ cli({
         {name: 'delay', type: 'int', default: 4000, help: '每条详情之间的延迟 ms(主防风控参数)'},
         {name: 'jitter', type: 'int', default: 3000, help: '延迟的随机抖动 ms(拟人节奏)'},
         {name: 'pause_every', type: 'int', default: 5, help: '每 N 条插一次长停(0=关闭)'},
-        {name: 'pause_ms', type: 'int', default: 8000, help: '长停的毫秒数'},
-        {name: 'interim_dwell', type: 'int', default: 3000, help: '中转页(违规中心)mount 后停留 ms(拟人浏览,跳详情前)'},
+        // 声明 timeout arg = 让 OpenCLI 用这个值(+padding)当运行上限,而不是默认 60s。
+        // 批量带详情很慢(90 条 10-15 分钟),60s 必超时。可用 --timeout <秒> 临时加大。
+        {name: 'timeout', type: 'int', default: 1800, help: '整条命令的运行上限秒数(批量很慢,默认 30 分钟)'},
         {
             name: 'category',
             default: '',
@@ -113,13 +114,16 @@ cli({
         const delayMs = Math.max(0, num(args.delay, 4000));
         const jitterMs = Math.max(0, num(args.jitter, 2000));
         const pauseEvery = Math.max(0, num(args.pause_every, 5));
-        const pauseMs = Math.max(0, num(args.pause_ms, 8000));
-        const interimDwellMs = Math.max(0, num(args.interim_dwell, 3000));
+
+        // 真·固定 sleep:page.wait(数字>=1) 实际是「等 DOM 稳定,数字只是上限」,DOM 一安静
+        // (~500ms)就提前返回,根本不睡满秒数 —— 拟人间隔必须用 page.wait({time}) 走纯 setTimeout。
+        const sleep = (secs) => page.wait({time: secs});
 
         // 统一节奏:delay + [0,jitter) 随机,转秒。条目间和条目内 tab 切换共用,
         // 一个 --delay 同时控制两处,避免 tab 切换间隔写死、跟不上 delay 调整。
         const pacedSecs = () => (delayMs + (jitterMs > 0 ? Math.random() * jitterMs : 0)) / 1000;
 
+        try {
         const filterSpec = buildFilterSpec(args);
         if (filterSpec) {
             process.stderr.write(`[filter] ${describeFilterSpec(filterSpec)}\n`);
@@ -127,7 +131,9 @@ cli({
 
         // ─── 阶段 1: 进入选品库,抓 list + token ────────────────────────
         await page.goto(LANDING_URL);
-        await page.wait(3);
+        // 固定 sleep 3s 让 SPA 引导启动(用 sleep 而非 page.wait(3) —— 后者是 DOM-stable,
+        // 可能在 XHR 间隙提前返回,导致下面 pushState 在 React Router 挂好前就触发、切路由失败)。
+        await sleep(5);
         if (filterSpec) {
             // 必须在 installInterceptor 之前,这样 interceptor 的 fetch patch
             // 会叠在我们的 body 改写器之上,触发时:
@@ -161,14 +167,16 @@ cli({
 
         const scrollsNeeded = Math.max(0, Math.ceil(desired / ITEMS_PER_PAGE) - 1);
         for (let i = 0; i < scrollsNeeded; i++) {
+            const before = (await page.getInterceptedRequests()).length;
             await page.scroll('down');
-            await page.wait(waitSecs);
-            try {
-                await page.waitForCapture(waitSecs);
-            } catch {
-                break; // 翻不下去就停
-            }
+            await sleep(pacedSecs()); // 真 sleep 等新一页 material_list 回来
+            // 用捕获数增量判断:没有新响应 = 翻到底了,停。
+            // (不用 waitForCapture —— 它只看数组非空,初始页早已录入、永远瞬间返回,break 失效)
+            const after = (await page.getInterceptedRequests()).length;
+            if (after <= before) break;
         }
+
+        await sleep(4);
 
         const listCaptures = await page.getInterceptedRequests();
         const listItems = dedupListItems(
@@ -193,6 +201,7 @@ cli({
         const targets = listItems.slice(0, desired);
         const results = [];
         let successCount = 0;
+        const batchT0 = Date.now();
 
         for (let i = 0; i < targets.length; i++) {
             const item = targets[i];
@@ -201,6 +210,7 @@ cli({
                 results.push(buildRow(item, null, null, null, null, '', false));
                 continue;
             }
+            const itemT0 = Date.now();
 
             // 周期性刷 token
             if (successCount > 0 && successCount % TOKEN_REFRESH_EVERY === 0) {
@@ -222,22 +232,22 @@ cli({
             // material_list,且 DOM 信号比等请求更快、抗缓存。token 刷新仍走选品库(见 refreshTokens)。
             const detailUrl = buildDetailUrl(productId, productId, tokens);
 
-            await page.evaluate(`() => {
+            // 第一条详情从列表页(选品库)直接进来,没有上一个详情组件要卸载,
+            // 整个「违规中心」中转跳转(含 mount 确认)都跳过,直接 SPA 进详情。
+            let interimReady = true;
+            if (i > 0) {
+                await page.evaluate(`() => {
         window.history.pushState({}, '', ${JSON.stringify(INTERIM_PATH)});
         window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
       }`);
-            const interimReady = await waitForInterimMount(page, waitSecs);
+                interimReady = await waitForInterimMount(page, waitSecs);
+            }
             if (!interimReady) {
                 // 没确认到中转页 mount,继续(下一步详情 pushState 仍可能成功),但标记一下
                 process.stderr.write(`[warn] item ${i + 1}: 中转页(${INTERIM_MOUNT_TEXT})未确认 mount,继续\n`);
             }
 
-            // 在中转页停留一会儿再跳详情 —— 拟人浏览节奏,避免"瞬切"指纹。
-            // 复用 jitter 做随机抖动,停留区间 [interimDwell, interimDwell+jitter]。
-            if (interimDwellMs > 0) {
-                const dwell = interimDwellMs + (jitterMs > 0 ? Math.random() * jitterMs : 0);
-                await page.wait(dwell / 1000);
-            }
+            await sleep(pacedSecs());
 
             await page.installInterceptor(PATTERN_DETAIL);
             processedIdx = (await page.getInterceptedRequests()).length;
@@ -247,71 +257,19 @@ cli({
         window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
       }`);
 
-            let firstCaptured = false;
-            try {
-                await page.waitForCapture(waitSecs * 2);
-                firstCaptured = true;
-            } catch {
-                // 完全超时
-            }
-            // 给"完整版" pack_detail 多等一会儿(React 可能分两次发)
-            await page.wait(2);
+            const firstCaptured = (await page.getInterceptedRequests()).length > processedIdx;
+            await sleep(pacedSecs());
 
-            // 触发 audience_analysis_data 响应:
-            //   React 把 SPA 进详情页时复用了上次的 tab state,
-            //   直接 click 受众 tab 不会触发 state change → 不 fetch。
-            //   修法:click 默认"带货数据"tab → 等 0.6s → click 受众 tab。
-            //   tab 组件挂载晚于 pack_detail 响应,所以要先 check + 必要时 wait。
-            //   ⚠️ 不在 evaluate 内部 await setTimeout,因为 page.evaluate 接字符串时
-            //   不保证 await 被外层消化 —— 改成外面 page.wait 拆 3 步。
-            const audienceTabReady = await page.evaluate(`() => {
-        if (document.getElementById('rc-tabs-0-tab-audience_data')) return true;
-        for (const t of document.querySelectorAll('[role=tab]')) {
-          if ((t.textContent || '').trim() === '受众数据') return true;
-        }
-        return false;
-      }`);
-
-            let audienceClickResult = null;
-            if (!audienceTabReady) {
-                await page.wait(2);
-            }
 
             // Step 1: 点默认"带货数据"tab(toggle 用)
             // ⚠️ 不用 el.click() —— 在 page.evaluate 通路里,React 合成事件
             //   可能拿不到。改用 dispatchEvent 派发完整的 mousedown+mouseup+click
             //   序列,更贴近真实用户交互。
             //
-            // ⚠️ 不用写死 rc-tabs-0-tab-data —— React 重新 mount Tabs 后
-            //   counter 会递增(rc-tabs-1, rc-tabs-2...)。从当前可见的
-            //   audience tab 出发,在同一个 tablist 容器里找 data tab,
-            //   保证不点到 DOM 残留的旧实例。
-            const step1 = await page.evaluate(`() => {
-        const fire = (el) => {
-          const opts = { bubbles: true, cancelable: true, view: window };
-          el.dispatchEvent(new MouseEvent('mousedown', opts));
-          el.dispatchEvent(new MouseEvent('mouseup', opts));
-          el.dispatchEvent(new MouseEvent('click', opts));
-        };
-        // 先找受众 tab(为了定位同一个 tablist 容器)
-        const aud = [...document.querySelectorAll('[role=tab]')].find(t => (t.textContent||'').trim() === '受众数据');
-        if (!aud) return { ok: false, reason: 'audience_tab_not_found_for_locate' };
-        const tablist = aud.closest('[role=tablist]') || aud.parentElement?.parentElement;
-        if (!tablist) return { ok: false, reason: 'tablist_not_found' };
-        const dataTab = [...tablist.querySelectorAll('[role=tab]')].find(t => (t.textContent||'').trim() === '带货数据');
-        if (!dataTab) return { ok: false, reason: 'data_tab_not_found' };
-        fire(dataTab);
-        return { ok: true, id: dataTab.id || null };
-      }`);
+            let audienceClickResult = null;
 
-            if (step1?.ok) {
-                // Step 2: 等 React 处理 tab 切换
-                //   原来固定 0.6s —— 太快且零抖动,是最像脚本的一段。
-                //   改用 delay+jitter(pacedSecs),跟着 --delay 一起放大/缩小。
-                await page.wait(pacedSecs());
-
-                // Step 3: 点"受众数据"tab(同样在同一个 tablist 里找)
-                audienceClickResult = await page.evaluate(`() => {
+            // Step 3: 点"受众数据"tab(同样在同一个 tablist 里找)
+            audienceClickResult = await page.evaluate(`() => {
           const fire = (el) => {
             const opts = { bubbles: true, cancelable: true, view: window };
             el.dispatchEvent(new MouseEvent('mousedown', opts));
@@ -323,18 +281,10 @@ cli({
           fire(aud);
           return { clicked: true, id: aud.id || null };
         }`);
-            } else {
-                audienceClickResult = {clicked: false, reason: step1?.reason || 'step1_failed'};
-            }
 
             if (audienceClickResult?.clicked) {
-                try {
-                    await page.waitForCapture(waitSecs);
-                } catch {
-                }
-                // 受众 pack_detail 抓完 → 点带货内容前的间隔。这是一条里两次 pack_detail
                 // 挨最近的地方,改用 delay+jitter(pacedSecs),跟 --delay 一起摊开速率。
-                await page.wait(pacedSecs());
+                await sleep(pacedSecs());
             }
 
             // 追加点"带货内容"tab:
@@ -357,12 +307,8 @@ cli({
         }`);
 
                 if (contentClickResult?.clicked) {
-                    try {
-                        await page.waitForCapture(waitSecs);
-                    } catch {
-                    }
                     // 带货内容 pack_detail 抓完 → 进条目间 delay 前的间隔,改用 delay+jitter(pacedSecs)。
-                    await page.wait(pacedSecs());
+                    await page.wait({time: 1})
                 }
             }
 
@@ -403,17 +349,35 @@ cli({
                 }
             }
 
-            // 节奏:条目间延迟 + 抖动(与条目内 tab 切换同一节奏)
-            const sleepSecs = pacedSecs();
-            if (sleepSecs > 0) await page.wait(sleepSecs);
+            // 每条操作耗时(不含下面的条目间 delay / 长停,只算中转+详情+tab+匹配)
+            const itemSecs = ((Date.now() - itemT0) / 1000).toFixed(1);
+            process.stderr.write(
+                `[time] item ${i + 1}/${targets.length} id=${productId} detail_ok=${!!productHit} ${itemSecs}s\n`,
+            );
 
-            // 每 N 条长停
-            if (pauseEvery > 0 && pauseMs > 0 && (i + 1) % pauseEvery === 0 && i + 1 < targets.length) {
-                await page.wait(pauseMs / 1000);
+            // 每 N 条长停(改用 pacedSecs,跟条目间同一节奏)
+            if (pauseEvery > 0 && (i + 1) % pauseEvery === 0 && i + 1 < targets.length) {
+                await sleep(pacedSecs());
             }
         }
 
-        return results;
+        const batchSecs = ((Date.now() - batchT0) / 1000).toFixed(1);
+        process.stderr.write(
+            `[time] 共 ${targets.length} 条,成功 ${successCount},总耗时 ${batchSecs}s(含所有延迟/长停)\n`,
+        );
+
+        // 只返回成功抓到详情的条目(detail_ok=true),丢掉只有 list 字段的失败条。
+        return results.filter((r) => r.detail_ok);
+        } finally {
+            // 注:命令被框架强制跑在 surface='adapter' 的持久后台窗口里(execution.js 写死),
+            // 该窗口由 Browser Bridge 扩展管理、给后续命令复用,插件层关不掉它:
+            //   - closeWindow()/closeTab() 走扩展 tab 抽象,对 adapter 窗口是 no-op
+            //   - CDP Target.*/Browser.* 被扩展白名单挡掉(只放行 DOM.*/Input.*)
+            // 所以这里只做 best-effort:释放 session 租约 + 尽量关掉当前详情 tab,不保证窗口消失。
+            // 真要「命令结束即关窗」得在 OpenCLI 框架 / Browser Bridge 扩展层做。
+            try { if (page.closeTab) await page.closeTab(); } catch { /* ignore */ }
+            try { await page.closeWindow(); } catch { /* ignore */ }
+        }
     },
 });
 
@@ -606,12 +570,16 @@ async function refreshTokens(page, waitSecs) {
     window.history.pushState({}, '', ${JSON.stringify(LIST_PATH)});
     window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
   }`);
-    try {
-        await page.waitForCapture(waitSecs * 2);
-    } catch {
-        return null;
+    // 轮询等"新一条" material_list 回来(真 sleep + 捕获数增量)。不能用 waitForCapture ——
+    // 此时 __opencli_xhr 早已堆满 list/detail,它只看数组非空会瞬间返回,等不到新响应、
+    // 导致 slice 为空、token 静默刷不上。
+    const deadline = Date.now() + waitSecs * 2 * 1000;
+    let after = await page.getInterceptedRequests();
+    while (after.length <= before && Date.now() < deadline) {
+        await page.wait({time: 0.5});
+        after = await page.getInterceptedRequests();
     }
-    const after = await page.getInterceptedRequests();
+    if (after.length <= before) return null;
     return extractLatestTokens(after.slice(before));
 }
 
