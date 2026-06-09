@@ -78,6 +78,7 @@ await page.waitForCapture(10);
         - 每条先 SPA 跳「违规中心」中转页做路由重置(见下),再跳详情
         - 每 25 条 SPA 回选品库刷一次 token(refreshTokens,规避 session 过期)
         - 每条间隔 delay (默认 4s) + 随机 jitter (默认 2s)
+        - 条目内 3 处 tab 切换(带货数据→受众→带货内容)也复用同一节奏(`pacedSecs` = delay+jitter)
         - 每 N=5 条插一个长停顿(默认 8s)
         - 失败条目只保留 list 字段,detail_ok=false,不中断整批
 ```
@@ -94,6 +95,12 @@ await page.waitForCapture(10);
 - ⚠️ 只有逐条的路由重置改了;**token 刷新仍走选品库**(material_list 才有 search_id/session_id)。
 
 参数:`--delay <ms>` / `--jitter <ms>` / `--pause_every <n>` / `--pause_ms <ms>` / `--interim_dwell <ms>`(中转页停留,拟人,默认 1500)。
+
+**节奏统一(2026-06-09)**:条目内 3 处 tab 切换的等待原来是写死的(1.5~4.5s),现已改用
+`pacedSecs()`(= `delay + 随机[0,jitter)`,转秒),和条目间 delay **同一公式**。所以 `--delay` / `--jitter`
+一个旋钮同时控制**条目间**和**条目内 tab 切换**两处节奏;加大 `--delay` 会让单条明显变慢(三处 tab 各 +几秒)。
+参数兜底统一用 `num(v,d)` helper(`Number.isFinite` 守 NaN,不吞 0),默认值跟参数定义对齐,
+且 `--pause_every 0` / `--pause_ms 0` / `--interim_dwell 0` 仍可显式关闭。
 
 **筛选参数**(都走 `installFilters` 改写 material_list 的 POST body,可叠加):
 - `--category <ids>`:类目(短 id→BusinessCid 顶级 / 长 id→MendelCid 子级)

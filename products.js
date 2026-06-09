@@ -68,7 +68,7 @@ cli({
         {name: 'limit', type: 'int', default: 30, help: '想要的商品总数(超过 30 会滚动列表)'},
         {name: 'wait', type: 'int', default: 6, help: '每个请求等响应的秒数(超时基数)'},
         {name: 'delay', type: 'int', default: 4000, help: '每条详情之间的延迟 ms(主防风控参数)'},
-        {name: 'jitter', type: 'int', default: 2000, help: '延迟的随机抖动 ms(拟人节奏)'},
+        {name: 'jitter', type: 'int', default: 3000, help: '延迟的随机抖动 ms(拟人节奏)'},
         {name: 'pause_every', type: 'int', default: 5, help: '每 N 条插一次长停(0=关闭)'},
         {name: 'pause_ms', type: 'int', default: 8000, help: '长停的毫秒数'},
         {name: 'interim_dwell', type: 'int', default: 3000, help: '中转页(违规中心)mount 后停留 ms(拟人浏览,跳详情前)'},
@@ -105,13 +105,20 @@ cli({
         'detail_ok',
     ],
     func: async (page, args) => {
-        const desired = Math.max(1, Number(args.limit) || ITEMS_PER_PAGE);
-        const waitSecs = Math.max(2, Number(args.wait) || 6);
-        const delayMs = Math.max(0, Number(args.delay) || 4000);
-        const jitterMs = Math.max(0, Number(args.jitter) || 2000);
-        const pauseEvery = Math.max(0, Number(args.pause_every) || 0);
-        const pauseMs = Math.max(0, Number(args.pause_ms) || 0);
-        const interimDwellMs = Math.max(0, Number(args.interim_dwell) || 0);
+        // num: 只兜 NaN/缺省(不吞 0),所以默认值能跟参数定义对齐,
+        //      且 --pause_every 0 / --pause_ms 0 / --interim_dwell 0 仍可显式关闭。
+        const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
+        const desired = Math.max(1, num(args.limit, ITEMS_PER_PAGE));
+        const waitSecs = Math.max(2, num(args.wait, 6));
+        const delayMs = Math.max(0, num(args.delay, 4000));
+        const jitterMs = Math.max(0, num(args.jitter, 2000));
+        const pauseEvery = Math.max(0, num(args.pause_every, 5));
+        const pauseMs = Math.max(0, num(args.pause_ms, 8000));
+        const interimDwellMs = Math.max(0, num(args.interim_dwell, 3000));
+
+        // 统一节奏:delay + [0,jitter) 随机,转秒。条目间和条目内 tab 切换共用,
+        // 一个 --delay 同时控制两处,避免 tab 切换间隔写死、跟不上 delay 调整。
+        const pacedSecs = () => (delayMs + (jitterMs > 0 ? Math.random() * jitterMs : 0)) / 1000;
 
         const filterSpec = buildFilterSpec(args);
         if (filterSpec) {
@@ -300,8 +307,8 @@ cli({
             if (step1?.ok) {
                 // Step 2: 等 React 处理 tab 切换
                 //   原来固定 0.6s —— 太快且零抖动,是最像脚本的一段。
-                //   加大到 1.5~2.5s 随机,打散规律节奏(拟人,缓解限流指纹)。
-                await page.wait(1.5 + Math.random());
+                //   改用 delay+jitter(pacedSecs),跟着 --delay 一起放大/缩小。
+                await page.wait(pacedSecs());
 
                 // Step 3: 点"受众数据"tab(同样在同一个 tablist 里找)
                 audienceClickResult = await page.evaluate(`() => {
@@ -326,9 +333,8 @@ cli({
                 } catch {
                 }
                 // 受众 pack_detail 抓完 → 点带货内容前的间隔。这是一条里两次 pack_detail
-                // 挨最近的地方,原来固定 1.5s 太突发。加大到 3~4.5s 随机,把 pack_detail
-                // 速率摊开(缓解 11001 限流)。
-                await page.wait(3 + Math.random() * 1.5);
+                // 挨最近的地方,改用 delay+jitter(pacedSecs),跟 --delay 一起摊开速率。
+                await page.wait(pacedSecs());
             }
 
             // 追加点"带货内容"tab:
@@ -355,8 +361,8 @@ cli({
                         await page.waitForCapture(waitSecs);
                     } catch {
                     }
-                    // 带货内容 pack_detail 抓完 → 进条目间 delay 前的间隔。加大到 2.5~4s 随机。
-                    await page.wait(2.5 + Math.random() * 1.5);
+                    // 带货内容 pack_detail 抓完 → 进条目间 delay 前的间隔,改用 delay+jitter(pacedSecs)。
+                    await page.wait(pacedSecs());
                 }
             }
 
@@ -397,9 +403,9 @@ cli({
                 }
             }
 
-            // 节奏:延迟 + 抖动
-            const sleepMs = delayMs + (jitterMs > 0 ? Math.random() * jitterMs : 0);
-            if (sleepMs > 0) await page.wait(sleepMs / 1000);
+            // 节奏:条目间延迟 + 抖动(与条目内 tab 切换同一节奏)
+            const sleepSecs = pacedSecs();
+            if (sleepSecs > 0) await page.wait(sleepSecs);
 
             // 每 N 条长停
             if (pauseEvery > 0 && pauseMs > 0 && (i + 1) % pauseEvery === 0 && i + 1 < targets.length) {
