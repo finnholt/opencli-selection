@@ -28,12 +28,11 @@ $Limit     = if ($env:PROBE_LIMIT)     { [int]$env:PROBE_LIMIT } else { 3 }
 $TimeoutS  = if ($env:PROBE_TIMEOUT)   { [int]$env:PROBE_TIMEOUT } else { 300 }
 $LogDir    = if ($env:PROBE_LOG_DIR)   { $env:PROBE_LOG_DIR } else { Join-Path $env:USERPROFILE 'selection-ratelimit-probe' }
 
-# opencli executable: env first, else resolve from PATH (usually opencli.cmd on Windows)
-$Bin = $env:OPENCLI_BIN
-if (-not $Bin) {
-  $cmd = Get-Command opencli -ErrorAction SilentlyContinue
-  if ($cmd) { $Bin = $cmd.Source } else { $Bin = 'opencli' }
-}
+# opencli is a Node CLI shim (opencli.cmd / extensionless shell script), NOT a Win32 .exe.
+# Launching it directly via Start-Process fails with "%1 is not a valid Win32 application".
+# So we invoke it through cmd.exe (/c), which resolves opencli.cmd on PATH for us.
+# Override with $env:OPENCLI_BIN only if you point it at opencli.cmd (not the bare script).
+$Invoke = if ($env:OPENCLI_BIN) { $env:OPENCLI_BIN } else { 'opencli' }
 
 $RawDir = Join-Path $LogDir 'raw'
 New-Item -ItemType Directory -Force -Path $RawDir | Out-Null
@@ -51,10 +50,11 @@ if (-not (Test-Path $Csv)) {
 
 # ---- run once (with timeout, stdout/stderr redirected separately) ----
 $env:OPENCLI_PROFILE = $ProfileId
-$cliArgs = @('selection','products','--limit', "$Limit", '-f','json')
+# cmd.exe /c <opencli> selection products ... -- cmd.exe IS a valid Win32 app and resolves the .cmd
+$cmdArgs = @('/c', $Invoke, 'selection', 'products', '--limit', "$Limit", '-f', 'json')
 
 $start = Get-Date
-$proc = Start-Process -FilePath $Bin -ArgumentList $cliArgs `
+$proc = Start-Process -FilePath $env:ComSpec -ArgumentList $cmdArgs `
   -RedirectStandardOutput $rawOut -RedirectStandardError $rawErr `
   -NoNewWindow -PassThru
 
