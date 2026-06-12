@@ -36,8 +36,11 @@ OpenCLI 插件 —— 抖音百应(选品广场)商家侧数据采集。
 cd /path/to/opencli-selection
 opencli plugin install file://$(pwd)
 
-# 从 GitHub
-opencli plugin install github:<user>/opencli-selection
+# 从 GitHub 安装
+opencli plugin install github:finnholt/opencli-selection
+
+# 从 GitHub 更新到最新(已安装后)
+opencli plugin update opencli-selection
 ```
 
 验证:

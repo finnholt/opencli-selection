@@ -1,30 +1,34 @@
 <#
-  百应限流探针(Windows / PowerShell 版)—— 对齐 ratelimit-probe.sh 的逻辑。
+  Buyin/selection rate-limit probe (Windows / PowerShell). Mirrors ratelimit-probe.sh.
 
-  每次跑一小批 products 详情,把「成功/被风控/报错」结构化记进 CSV,
-  跑几天后看 CSV 就能经验性地摸出限流阈值。
+  ASCII-only on purpose: Windows PowerShell 5.1 reads scripts as the system ANSI
+  codepage (GBK on zh-CN), so any non-ASCII literal in the file would be mis-decoded
+  and break parsing. Keep this file pure ASCII.
 
-  判定:products 只返回 detail_ok=true 的条目,所以
-    got < requested -> 有详情被限流/失败
-    got == 0        -> 整批被拦(多半风控)
-  再扫 stdout+stderr 文案给分类标签(网络不稳定/滑块/登录失效)。
+  What it does each run: call `opencli selection products`, count how many items came
+  back with detail_ok=true, classify, append a row to probe.csv. Run it on a schedule
+  for a few days to empirically find the rate-limit threshold.
 
-  ⚠️ 必须在「已登录的交互桌面会话」里跑(Chrome + Browser Bridge 扩展 + daemon 都要在)。
-     所以计划任务要设成「仅在用户登录时运行」,不要勾「不管用户是否登录都运行」(那是 session 0,无 GUI)。
+  Logic: products only returns detail_ok=true rows, so
+    got < requested -> some details were throttled/failed
+    got == 0        -> whole batch blocked (likely risk control)
 
-  手动跑:  powershell -NoProfile -ExecutionPolicy Bypass -File .\ratelimit-probe.ps1
-  可用环境变量覆盖:OPENCLI_PROFILE / PROBE_LIMIT / PROBE_TIMEOUT / OPENCLI_BIN / PROBE_LOG_DIR
+  Must run in an interactive, logged-in desktop session (Chrome + Browser Bridge
+  extension + daemon all need to be live).
+
+  Manual run:  powershell -NoProfile -ExecutionPolicy Bypass -File .\ratelimit-probe.ps1
+  Env overrides: OPENCLI_PROFILE / PROBE_LIMIT / PROBE_TIMEOUT / OPENCLI_BIN / PROBE_LOG_DIR
 #>
 
 $ErrorActionPreference = 'Continue'
 
-# ── 可调参数(环境变量优先)──
-$Profile_  = if ($env:OPENCLI_PROFILE) { $env:OPENCLI_PROFILE } else { '7jgudy3t' }
+# ---- tunables (env wins) ----
+$ProfileId = if ($env:OPENCLI_PROFILE) { $env:OPENCLI_PROFILE } else { '7jgudy3t' }
 $Limit     = if ($env:PROBE_LIMIT)     { [int]$env:PROBE_LIMIT } else { 3 }
 $TimeoutS  = if ($env:PROBE_TIMEOUT)   { [int]$env:PROBE_TIMEOUT } else { 300 }
 $LogDir    = if ($env:PROBE_LOG_DIR)   { $env:PROBE_LOG_DIR } else { Join-Path $env:USERPROFILE 'selection-ratelimit-probe' }
 
-# opencli 可执行文件:优先环境变量,否则从 PATH 解析(Windows 上通常是 opencli.cmd)
+# opencli executable: env first, else resolve from PATH (usually opencli.cmd on Windows)
 $Bin = $env:OPENCLI_BIN
 if (-not $Bin) {
   $cmd = Get-Command opencli -ErrorAction SilentlyContinue
@@ -34,35 +38,35 @@ if (-not $Bin) {
 $RawDir = Join-Path $LogDir 'raw'
 New-Item -ItemType Directory -Force -Path $RawDir | Out-Null
 
-$Csv      = Join-Path $LogDir 'probe.csv'
-$ts       = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-$stamp    = Get-Date -Format 'yyyyMMdd-HHmmss'
-$rawOut   = Join-Path $RawDir "$stamp.stdout.json"
-$rawErr   = Join-Path $RawDir "$stamp.stderr.log"
+$Csv    = Join-Path $LogDir 'probe.csv'
+$ts     = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+$stamp  = Get-Date -Format 'yyyyMMdd-HHmmss'
+$rawOut = Join-Path $RawDir "$stamp.stdout.json"
+$rawErr = Join-Path $RawDir "$stamp.stderr.log"
 
-# CSV 表头(只在首次创建时写;用 UTF8 以正确存中文)
+# CSV header (only on first create)
 if (-not (Test-Path $Csv)) {
   'ts,requested,got,duration_s,exit_code,verdict,note' | Out-File -FilePath $Csv -Encoding utf8
 }
 
-# ── 跑一次(带超时 + 分别重定向 stdout/stderr)──
-$env:OPENCLI_PROFILE = $Profile_
-$args = @('selection','products','--limit', "$Limit", '-f','json')
+# ---- run once (with timeout, stdout/stderr redirected separately) ----
+$env:OPENCLI_PROFILE = $ProfileId
+$cliArgs = @('selection','products','--limit', "$Limit", '-f','json')
 
 $start = Get-Date
-$proc = Start-Process -FilePath $Bin -ArgumentList $args `
+$proc = Start-Process -FilePath $Bin -ArgumentList $cliArgs `
   -RedirectStandardOutput $rawOut -RedirectStandardError $rawErr `
   -NoNewWindow -PassThru
 
 if (-not $proc.WaitForExit($TimeoutS * 1000)) {
   try { $proc.Kill() } catch {}
-  $exitCode = 124   # 超时,约定用 124(同 GNU timeout)
+  $exitCode = 124   # timeout, same convention as GNU timeout
 } else {
   $exitCode = $proc.ExitCode
 }
 $duration = [int]((Get-Date) - $start).TotalSeconds
 
-# ── 解析结果 ──
+# ---- parse result ----
 $got = 0
 $outText = ''
 if (Test-Path $rawOut) { $outText = Get-Content -Raw -Encoding utf8 $rawOut }
@@ -74,7 +78,7 @@ try {
     $got = 1
   }
 } catch {
-  # 不是合法 JSON(多半整批失败):退化成数 "detail_ok":true 出现次数
+  # not valid JSON (likely whole batch failed): fall back to counting the marker
   $got = ([regex]::Matches($outText, '"detail_ok":true')).Count
 }
 
@@ -82,26 +86,27 @@ $errText = ''
 if (Test-Path $rawErr) { $errText = Get-Content -Raw -Encoding utf8 $rawErr }
 $blob = "$outText`n$errText"
 
-# 扫文案给分类标签
+# Classify. The masked page error "network unstable" usually shows up as got=0 here,
+# so we lean on the count + a few ASCII markers rather than matching Chinese text.
 $verdict = ''
-if     ($blob -match '网络不稳定|网络异常|网络开小差') { $verdict = 'net_unstable(疑风控)' }
-elseif ($blob -match '滑块|验证码|captcha|verify|安全验证') { $verdict = 'captcha(风控)' }
-elseif ($blob -match '登录失效|未登录|not.?login|AuthRequired|请重新登录') { $verdict = 'auth(登录态丢失)' }
+if     ($blob -match 'AuthRequired|not.?login|-1025|relogin|re-login') { $verdict = 'auth(login_lost)' }
+elseif ($blob -match 'captcha|verify|slider|risk')                     { $verdict = 'captcha(risk)' }
 elseif ($exitCode -ne 0) { $verdict = "error(exit=$exitCode)" }
-elseif ($got -eq 0)      { $verdict = 'empty(整批掉)' }
+elseif ($got -eq 0)      { $verdict = 'empty(all_dropped)' }
 elseif ($got -lt $Limit) { $verdict = "partial($got/$Limit)" }
 else                     { $verdict = 'ok' }
 
-# 取 stderr 末行当 note(去逗号/换行,免得撑破 CSV;截 120 字)
+# last non-empty stderr line as note (strip commas/newlines, cap 120 chars)
 $note = ''
 if ($errText) {
   $lastLine = ($errText -split "`r?`n" | Where-Object { $_ -ne '' } | Select-Object -Last 1)
   if ($lastLine) {
-    $note = ($lastLine -replace ',', ';' -replace "`r|`n", ';')
+    $note = ($lastLine -replace ',', ';')
+    $note = ($note -replace "`r", '' -replace "`n", '')
     if ($note.Length -gt 120) { $note = $note.Substring(0,120) }
   }
 }
 
-# ── 落 CSV + 控制台回显 ──
+# ---- append CSV + console echo ----
 "$ts,$Limit,$got,$duration,$exitCode,$verdict,$note" | Add-Content -Path $Csv -Encoding utf8
 Write-Host "[$ts] requested=$Limit got=$got ${duration}s exit=$exitCode -> $verdict"
