@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>百应登录二维码预览</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 20px;
+      padding: 32px 16px;
+      font: 14px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: #f5f5f7;
+      color: #1d1d1f;
+    }
+    @media (prefers-color-scheme: dark) {
+      body { background: #1a1a1c; color: #e8e8ea; }
+      textarea { background: #2a2a2d; color: #e8e8ea; border-color: #444; }
+      .card { background: #2a2a2d; }
+      .hint { color: #999; }
+    }
+    h1 { font-size: 18px; margin: 0; font-weight: 600; }
+    .hint { color: #6e6e73; font-size: 13px; text-align: center; max-width: 520px; }
+    textarea {
+      width: min(720px, 92vw);
+      height: 120px;
+      padding: 12px 14px;
+      border: 1px solid #d2d2d7;
+      border-radius: 10px;
+      font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+      resize: vertical;
+      outline: none;
+    }
+    textarea:focus { border-color: #0071e3; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+    button {
+      padding: 9px 18px;
+      border: none;
+      border-radius: 8px;
+      background: #0071e3;
+      color: #fff;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    button.ghost { background: #e2e2e6; color: #1d1d1f; }
+    button:active { transform: translateY(1px); }
+    .card {
+      background: #fff;
+      border-radius: 16px;
+      padding: 24px;
+      box-shadow: 0 6px 24px rgba(0,0,0,.08);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+      min-width: 260px;
+    }
+    .card img { width: 240px; height: 240px; image-rendering: pixelated; border-radius: 8px; }
+    .meta { font-size: 12px; color: #6e6e73; }
+    .empty { width: 240px; height: 240px; display: flex; align-items: center; justify-content: center; color: #aaa; border: 2px dashed #d2d2d7; border-radius: 8px; }
+    .error { color: #e23; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>百应扫码登录 — 二维码预览</h1>
+  <p class="hint">
+    把 <code>login</code> 命令输出的 <code>qr_base64</code> 整段(<code>data:image/png;base64,…</code>)
+    或裸 base64 粘进下面文本框。也支持把 <code>QR_READY {…}</code> 那一整行 stderr 直接粘进来,会自动抽出 <code>base64</code> 字段。
+  </p>
+
+  <textarea id="input" placeholder="data:image/png;base64,iVBORw0KGgo...  或  QR_READY {&quot;base64&quot;:&quot;data:image/png;base64,...&quot;}">
+    data:image/png;base64,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
+  </textarea>
+
+  <div class="row">
+    <button id="render">渲染二维码</button>
+    <button class="ghost" id="clear">清空</button>
+  </div>
+
+  <div class="card">
+    <div id="slot"><div class="empty">等待粘贴…</div></div>
+    <div class="meta" id="meta"></div>
+  </div>
+
+  <script>
+    const input = document.getElementById('input');
+    const slot = document.getElementById('slot');
+    const meta = document.getElementById('meta');
+
+    // 接受三种输入:① 完整 data URI ② 裸 base64 ③ 整行 QR_READY {json}
+    function extractDataUri(raw) {
+      const s = raw.trim();
+      if (!s) return null;
+
+      // ③ QR_READY {json}:抽 .base64 字段
+      if (s.startsWith('QR_READY')) {
+        try {
+          const json = JSON.parse(s.slice('QR_READY'.length).trim());
+          if (json.base64) return json.base64;
+        } catch { /* 落到下面按文本处理 */ }
+      }
+      // 也兼容直接粘了一段 JSON 对象
+      if (s[0] === '{') {
+        try {
+          const json = JSON.parse(s);
+          if (json.base64) return json.base64;
+          if (json.qr_base64) return json.qr_base64;
+        } catch { /* 忽略 */ }
+      }
+
+      // ① 已经是 data URI
+      if (s.startsWith('data:image')) return s;
+
+      // ② 裸 base64(去掉可能混入的空白/换行)
+      const cleaned = s.replace(/\s+/g, '');
+      if (/^[A-Za-z0-9+/=]+$/.test(cleaned) && cleaned.length > 50) {
+        return 'data:image/png;base64,' + cleaned;
+      }
+      return null;
+    }
+
+    function render() {
+      const uri = extractDataUri(input.value);
+      if (!uri) {
+        slot.innerHTML = '<div class="empty error">没识别出 base64<br>(检查是否粘全)</div>';
+        meta.textContent = '';
+        return;
+      }
+      const img = new Image();
+      img.onload = () => {
+        slot.innerHTML = '';
+        slot.appendChild(img);
+        const bytes = Math.round((uri.split(',')[1] || '').length * 3 / 4);
+        meta.textContent = `${img.naturalWidth}×${img.naturalHeight}px · ~${(bytes / 1024).toFixed(1)} KB`;
+      };
+      img.onerror = () => {
+        slot.innerHTML = '<div class="empty error">base64 解不出合法图片</div>';
+        meta.textContent = '';
+      };
+      img.src = uri;
+    }
+
+    document.getElementById('render').onclick = render;
+    document.getElementById('clear').onclick = () => {
+      input.value = '';
+      slot.innerHTML = '<div class="empty">等待粘贴…</div>';
+      meta.textContent = '';
+      input.focus();
+    };
+    // 粘贴即渲染,省一次点击
+    input.addEventListener('paste', () => setTimeout(render, 0));
+    input.addEventListener('input', render);
+  </script>
+</body>
+</html>

@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  百应限流探针的用户 LaunchAgent:每小时整点跑一次 ratelimit-probe.sh。
+
+  为什么用 LaunchAgent 而不是 cron:
+    opencli 依赖运行中的 Chrome + Browser Bridge 扩展 + daemon,这些只活在你的**图形登录会话**里。
+    用户 LaunchAgent 就是在该 Aqua 会话内执行,浏览器连得上;root crontab 在无 GUI 的会话跑,连不上。
+
+  装法(见文件末尾注释 / 对话里的步骤)。
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.selection.ratelimit-probe</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/tengxinde/Documents/Projects/Vue/opencli-selection/ratelimit-probe.sh</string>
+  </array>
+
+  <!-- 关键:喂全 PATH(含 nvm 的 node 目录),否则找不到 opencli/node -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/tengxinde/.nvm/versions/node/v22.22.3/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>OPENCLI_PROFILE</key>
+    <string>7jgudy3t</string>
+    <key>OPENCLI_BIN</key>
+    <string>/Users/tengxinde/.nvm/versions/node/v22.22.3/bin/opencli</string>
+    <key>PROBE_LIMIT</key>
+    <string>3</string>
+  </dict>
+
+  <!-- 「load 即跑一次,之后每隔 1 小时」:从触发那刻起算,不卡时钟整点。
+       RunAtLoad=true 在 load 瞬间跑第一次;StartInterval=3600 此后每 3600s 再跑。
+       想换频率改 StartInterval 的秒数(1800=30分,900=15分)。 -->
+  <key>StartInterval</key>
+  <integer>3600</integer>
+
+  <!-- launchd 自己的 stdout/stderr(脚本内部还会另写 CSV + raw/) -->
+  <key>StandardOutPath</key>
+  <string>/Users/tengxinde/selection-ratelimit-probe/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/tengxinde/selection-ratelimit-probe/launchd.err.log</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>

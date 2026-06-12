@@ -27,7 +27,7 @@ const PAGE_URL = 'https://buyin.jinritemai.com/dashboard/merch-picking-library';
 const API_BASE = 'https://buyin.jinritemai.com/pc/selection/common/cate_info';
 
 cli({
-  site: 'buyin',
+  site: 'selection',
   name: 'categories',
   access: 'read',
   description: '百应选品库类目树(默认:顶级 + childs;--parent x:单级;--flat:拍平)',
@@ -48,7 +48,7 @@ cli({
       const items = await fetchCategories(page, { cate_type: 3, parent_id: args.parent });
       if (items.length === 0) {
         throw new EmptyResultError(
-          'buyin categories',
+          'selection categories',
           `parent_id=${args.parent} 下没有子类目`,
         );
       }
@@ -65,7 +65,7 @@ cli({
     // ── 模式 2:默认 / --flat 全量树 ───────────────────────────
     const tops = await fetchCategories(page, { cate_type: 1 });
     if (tops.length === 0) {
-      throw new EmptyResultError('buyin categories', '一级类目为空');
+      throw new EmptyResultError('selection categories', '一级类目为空');
     }
 
     const sleepMs = Math.max(0, Number(args.sleep) || 200);

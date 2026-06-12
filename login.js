@@ -39,7 +39,7 @@ const LOGIN_URL =
 const QR_IFRAME = 'iframe[src*=qrconnect]';
 
 cli({
-  site: 'buyin',
+  site: 'selection',
   name: 'login',
   access: 'read',
   description:

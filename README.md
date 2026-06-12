@@ -1,4 +1,4 @@
-# opencli-buyin
+# opencli-selection
 
 OpenCLI 插件 —— 抖音百应(选品广场)商家侧数据采集。
 
@@ -8,9 +8,9 @@ OpenCLI 插件 —— 抖音百应(选品广场)商家侧数据采集。
 
 | 命令 | 数据 | 策略 | 输出形态 |
 |---|---|---|---|
-| `opencli buyin products` | 选品库"为你推荐"商品列表(可滚动分页,可类目筛选,默认带完整详情) | INTERCEPT(批量两阶段) | 多行,每行 1 个商品 |
-| `opencli buyin categories` | 选品库类目树(顶级 17 项 + 每个顶级下的子级) | COOKIE | 树形 / 拍平 |
-| `opencli buyin login` | 抓扫码登录二维码存 PNG / base64,可轮询等扫码完成 | UI(CDP 裁剪截图) | 单行(状态 + 二维码) |
+| `opencli selection products` | 选品库"为你推荐"商品列表(可滚动分页,可类目筛选,默认带完整详情) | INTERCEPT(批量两阶段) | 多行,每行 1 个商品 |
+| `opencli selection categories` | 选品库类目树(顶级 17 项 + 每个顶级下的子级) | COOKIE | 树形 / 拍平 |
+| `opencli selection login` | 抓扫码登录二维码存 PNG / base64,可轮询等扫码完成 | UI(CDP 裁剪截图) | 单行(状态 + 二维码) |
 
 所有命令都默认 `-f table`,加 `-f json/csv/markdown/yaml` 切换输出格式。
 
@@ -33,17 +33,17 @@ OpenCLI 插件 —— 抖音百应(选品广场)商家侧数据采集。
 
 ```bash
 # 本地开发(symlink,改代码立即生效)
-cd /path/to/opencli-buyin
+cd /path/to/opencli-selection
 opencli plugin install file://$(pwd)
 
 # 从 GitHub
-opencli plugin install github:<user>/opencli-buyin
+opencli plugin install github:<user>/opencli-selection
 ```
 
 验证:
 ```bash
 opencli plugin list
-opencli buyin --help
+opencli selection --help
 ```
 
 ## 使用示例
@@ -52,24 +52,24 @@ opencli buyin --help
 
 ```bash
 # 默认 30 条,表格输出
-opencli buyin products
+opencli selection products
 
 # 90 条(自动滚 2 次)
-opencli buyin products --limit 90
+opencli selection products --limit 90
 
 # 导出 Excel
-opencli buyin products --limit 90 -f csv -o ~/buyin-products.csv
+opencli selection products --limit 90 -f csv -o ~/buyin-products.csv
 
 # 给脚本管道用
-opencli buyin products --limit 30 -f json | jq '.[] | select(.commission_rate >= 20)'
+opencli selection products --limit 30 -f json | jq '.[] | select(.commission_rate >= 20)'
 
 # 按类目过滤(id 从 categories 命令拿)
-opencli buyin products --category 5                       # 顶级"美妆"(BusinessCid)
-opencli buyin products --category 1000003462              # 子级长 id(MendelCid)
-opencli buyin products --category 5,1000003462            # 多个一起传(短/长自动分发)
+opencli selection products --category 5                       # 顶级"美妆"(BusinessCid)
+opencli selection products --category 1000003462              # 子级长 id(MendelCid)
+opencli selection products --category 5,1000003462            # 多个一起传(短/长自动分发)
 ```
 
-`--category` 接受 id(逗号分隔多个):短 id(<7 位,如 `"5"`)走顶级 `BusinessCid`,长 id(≥7 位,如 `"1000003462"`)走子级 `MendelCid`,**自动识别**。先跑 `opencli buyin categories -f json` 拿 id。
+`--category` 接受 id(逗号分隔多个):短 id(<7 位,如 `"5"`)走顶级 `BusinessCid`,长 id(≥7 位,如 `"1000003462"`)走子级 `MendelCid`,**自动识别**。先跑 `opencli selection categories -f json` 拿 id。
 
 #### 输出列(7 个)
 
@@ -89,13 +89,13 @@ opencli buyin products --category 5,1000003462            # 多个一起传(短/
 
 ```bash
 # 默认:顶级 17 项,每个带 childs 嵌套
-opencli buyin categories -f json
+opencli selection categories -f json
 
 # 单级查询(只看 13 = 食品饮料 下的子级)
-opencli buyin categories --parent 13
+opencli selection categories --parent 13
 
 # 拍平成 CSV
-opencli buyin categories --flat -f csv -o ~/buyin-cate-tree.csv
+opencli selection categories --flat -f csv -o ~/buyin-cate-tree.csv
 ```
 
 #### 类目体系说明
@@ -116,13 +116,13 @@ opencli buyin categories --flat -f csv -o ~/buyin-cate-tree.csv
 
 ```bash
 # 抓二维码存 PNG
-opencli buyin login --out /tmp/buyin-qr.png
+opencli selection login --out /tmp/buyin-qr.png
 
 # 抓完后轮询等扫码完成(离开登录页 = 登录态已写入该 Chrome profile)
-opencli buyin login --out /tmp/buyin-qr.png --poll --timeout 180
+opencli selection login --out /tmp/buyin-qr.png --poll --timeout 180
 
 # 只要 base64(不落盘),给服务/前端消费
-opencli buyin login --out "" --base64 -f json
+opencli selection login --out "" --base64 -f json
 ```
 
 | 参数 | 默认 | 说明 |
@@ -149,7 +149,7 @@ opencli buyin login --out "" --base64 -f json
 > ```js
 > import { execFileSync } from 'node:child_process';
 > const out = execFileSync('opencli',
->   ['buyin', 'login', '--out', '', '--base64', '-f', 'json'],
+>   ['selection', 'login', '--out', '', '--base64', '-f', 'json'],
 >   { env: { ...process.env, OPENCLI_PROFILE: '<profile>' }, encoding: 'utf8' });
 > const dataUri = JSON.parse(out)[0].qr_base64; // <img src> 直接可用
 > ```
@@ -183,19 +183,19 @@ opencli buyin login --out "" --base64 -f json
 ```bash
 # 本地修改后,symlink 安装下命令立即生效
 vim products.js
-opencli buyin products --limit 5
+opencli selection products --limit 5
 
 # 改了 opencli-plugin.json 或加了 .ts 文件,要重装
-opencli plugin update opencli-buyin
+opencli plugin update opencli-selection
 
 # 卸载
-opencli plugin uninstall opencli-buyin
+opencli plugin uninstall opencli-selection
 ```
 
 ### 项目结构
 
 ```
-opencli-buyin/
+opencli-selection/
 ├── _shared/
 │   └── browser-fetch.js     # 同源 fetch 工具(借浏览器签名)
 ├── products.js              # 商品列表 + 批量详情(INTERCEPT)

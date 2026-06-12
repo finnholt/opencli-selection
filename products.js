@@ -58,7 +58,7 @@ const ITEMS_PER_PAGE = 30;
 const TOKEN_REFRESH_EVERY = 25; // 接近 session 寿命下沿(5 分钟),提前刷
 
 cli({
-    site: 'buyin',
+    site: 'selection',
     name: 'products',
     access: 'read',
     description: '百应选品库商品(带完整详情,批量,逐条带 jitter 抓 pack_detail)',
@@ -67,8 +67,8 @@ cli({
     args: [
         {name: 'limit', type: 'int', default: 30, help: '想要的商品总数(超过 30 会滚动列表)'},
         {name: 'wait', type: 'int', default: 6, help: '每个请求等响应的秒数(超时基数)'},
-        {name: 'delay', type: 'int', default: 4000, help: '每条详情之间的延迟 ms(主防风控参数)'},
-        {name: 'jitter', type: 'int', default: 3000, help: '延迟的随机抖动 ms(拟人节奏)'},
+        {name: 'delay', type: 'int', default: 2000, help: '每条详情之间的延迟 ms(主防风控参数)'},
+        {name: 'jitter', type: 'int', default: 1000, help: '延迟的随机抖动 ms(拟人节奏)'},
         {name: 'pause_every', type: 'int', default: 5, help: '每 N 条插一次长停(0=关闭)'},
         // 声明 timeout arg = 让 OpenCLI 用这个值(+padding)当运行上限,而不是默认 60s。
         // 批量带详情很慢(90 条 10-15 分钟),60s 必超时。可用 --timeout <秒> 临时加大。
@@ -111,8 +111,8 @@ cli({
         const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
         const desired = Math.max(1, num(args.limit, ITEMS_PER_PAGE));
         const waitSecs = Math.max(2, num(args.wait, 6));
-        const delayMs = Math.max(0, num(args.delay, 4000));
-        const jitterMs = Math.max(0, num(args.jitter, 2000));
+        const delayMs = Math.max(0, num(args.delay, 2000));
+        const jitterMs = Math.max(0, num(args.jitter, 1000));
         const pauseEvery = Math.max(0, num(args.pause_every, 5));
 
         // 真·固定 sleep:page.wait(数字>=1) 实际是「等 DOM 稳定,数字只是上限」,DOM 一安静
@@ -133,7 +133,7 @@ cli({
         await page.goto(LANDING_URL);
         // 固定 sleep 3s 让 SPA 引导启动(用 sleep 而非 page.wait(3) —— 后者是 DOM-stable,
         // 可能在 XHR 间隙提前返回,导致下面 pushState 在 React Router 挂好前就触发、切路由失败)。
-        await sleep(5);
+        await sleep(3);
         if (filterSpec) {
             // 必须在 installInterceptor 之前,这样 interceptor 的 fetch patch
             // 会叠在我们的 body 改写器之上,触发时:
@@ -176,7 +176,7 @@ cli({
             if (after <= before) break;
         }
 
-        await sleep(4);
+        await sleep(3);
 
         const listCaptures = await page.getInterceptedRequests();
         const listItems = dedupListItems(
@@ -184,7 +184,7 @@ cli({
         );
         if (listItems.length === 0) {
             throw new EmptyResultError(
-                'buyin products',
+                'selection products',
                 '商品列表为空。已捕获响应但 summary_promotions 为空,接口字段可能已变。',
             );
         }

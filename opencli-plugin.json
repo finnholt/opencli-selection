@@ -1,6 +1,6 @@
 {
-  "name": "opencli-buyin",
+  "name": "opencli-selection",
   "version": "0.1.0",
-  "description": "An opencli plugin: opencli-buyin",
+  "description": "An opencli plugin: opencli-selection",
   "opencli": ">=1.8.0"
 }

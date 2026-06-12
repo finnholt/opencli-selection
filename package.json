@@ -1,8 +1,8 @@
 {
-  "name": "opencli-plugin-opencli-buyin",
+  "name": "opencli-plugin-opencli-selection",
   "version": "0.1.0",
   "type": "module",
-  "description": "An opencli plugin: opencli-buyin",
+  "description": "An opencli plugin: opencli-selection",
   "peerDependencies": {
     "@jackwener/opencli": ">=1.8.0"
   }

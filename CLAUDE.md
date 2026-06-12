@@ -6,7 +6,7 @@
 
 **OpenCLI 插件**,把抖音百应(buyin.jinritemai.com)选品广场的商家侧数据封装成 CLI 命令。
 
-- **不是**独立爬虫,而是 OpenCLI 注册的命令包,装到 `~/.opencli/plugins/opencli-buyin/`
+- **不是**独立爬虫,而是 OpenCLI 注册的命令包,装到 `~/.opencli/plugins/opencli-selection/`
 - **不能**在无浏览器的服务器裸跑 —— 依赖本机已登录的 Chrome + Browser Bridge 扩展 + OpenCLI daemon
 - **每条命令**用 `cli({...})` API 注册,文件名 = 命令名(去掉 `.js`),`site` 字段决定命令前缀
 
@@ -14,9 +14,9 @@
 
 | 文件 | 命令 | 策略 | 干啥 |
 |---|---|---|---|
-| `products.js` | `opencli buyin products` | INTERCEPT(批量两阶段) | 选品库商品列表**默认带完整详情**(逐条 pack_detail,慢) |
-| `categories.js` | `opencli buyin categories` | COOKIE | 拉选品库类目树(3 层) |
-| `login.js` | `opencli buyin login` | UI(CDP 裁剪截图) | 抓扫码登录二维码存 PNG;`--poll` 轮询等扫码完成 |
+| `products.js` | `opencli selection products` | INTERCEPT(批量两阶段) | 选品库商品列表**默认带完整详情**(逐条 pack_detail,慢) |
+| `categories.js` | `opencli selection categories` | COOKIE | 拉选品库类目树(3 层) |
+| `login.js` | `opencli selection login` | UI(CDP 裁剪截图) | 抓扫码登录二维码存 PNG;`--poll` 轮询等扫码完成 |
 
 ## 关键架构决策
 
@@ -220,19 +220,19 @@ opencli browser scout network --detail "<那条 key>" --max-body 15000 | jq '.bo
 ### 新加一个命令
 
 1. 在根目录新建 `<name>.js`
-2. import `{ cli, Strategy }`,调用 `cli({ site: 'buyin', name: 'xxx', ... })`
-3. 跑 `opencli plugin update opencli-buyin` 让 OpenCLI 重新扫描
-4. 验证 `opencli buyin --help` 看到新命令
+2. import `{ cli, Strategy }`,调用 `cli({ site: 'selection', name: 'xxx', ... })`
+3. 跑 `opencli plugin update opencli-selection` 让 OpenCLI 重新扫描
+4. 验证 `opencli selection --help` 看到新命令
 
 ### 修改 `opencli-plugin.json` 或加 `.ts` 文件
 
-必须重新跑 `opencli plugin update opencli-buyin`(需要 `esbuild` 装在依赖里:`npm i -D esbuild`)。
+必须重新跑 `opencli plugin update opencli-selection`(需要 `esbuild` 装在依赖里:`npm i -D esbuild`)。
 
 ### 卸载 / 重装
 
 ```bash
-opencli plugin uninstall opencli-buyin
-opencli plugin install file:///Users/tengxinde/Documents/Projects/Vue/opencli-buyin
+opencli plugin uninstall opencli-selection
+opencli plugin install file:///Users/tengxinde/Documents/Projects/Vue/opencli-selection
 ```
 
 ## 反爬与合规边界
@@ -256,7 +256,7 @@ opencli plugin install file:///Users/tengxinde/Documents/Projects/Vue/opencli-bu
 ## 项目结构
 
 ```
-opencli-buyin/
+opencli-selection/
 ├── _shared/
 │   └── browser-fetch.js     # 同源 fetch + 错误处理
 ├── products.js              # INTERCEPT 商品列表(默认带批量详情,见 §3.5)
