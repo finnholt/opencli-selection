@@ -2,7 +2,7 @@
 
 OpenCLI 插件 —— 抖音百应(选品广场)商家侧数据采集。
 
-借助你本机 Chrome 已登录的百应账号,通过 OpenCLI 的 INTERCEPT/COOKIE 策略,把选品库的商品/类目/详情数据抓成结构化输出(JSON / CSV / Markdown / 表格)。
+借助你本机 Chrome 已登录的百应账号,通过 OpenCLI 的 INTERCEPT/COOKIE 策略,把选品库的商品/类目/详情数据抓成结构化输出(JSON / CSV / Markdown / 表格)。登录态过期时还能用 `login` 命令抓扫码二维码重新登录。
 
 ## 命令一览
 
@@ -10,6 +10,7 @@ OpenCLI 插件 —— 抖音百应(选品广场)商家侧数据采集。
 |---|---|---|---|
 | `opencli buyin products` | 选品库"为你推荐"商品列表(可滚动分页,可类目筛选,默认带完整详情) | INTERCEPT(批量两阶段) | 多行,每行 1 个商品 |
 | `opencli buyin categories` | 选品库类目树(顶级 17 项 + 每个顶级下的子级) | COOKIE | 树形 / 拍平 |
+| `opencli buyin login` | 抓扫码登录二维码存 PNG / base64,可轮询等扫码完成 | UI(CDP 裁剪截图) | 单行(状态 + 二维码) |
 
 所有命令都默认 `-f table`,加 `-f json/csv/markdown/yaml` 切换输出格式。
 
@@ -109,6 +110,50 @@ opencli buyin categories --flat -f csv -o ~/buyin-cate-tree.csv
 - 顶级 ID 用于 `material_list` 接口的类目筛选
 - 选品分组的长 ID 跟 `material_list.summary_promotions[].base_model.product_info.category` 字段对应
 
+### 扫码登录二维码
+
+登录态过期(扫码失效后所有命令都会失败)时,用 `login` 重新拿一张二维码扫码登录。二维码是 `open.douyin.com` 的跨域 iframe,读不到 DOM,所以走 **CDP 原生裁剪截图**:每次现量二维码位置(换屏不裁偏),让 Chrome 只截那一块。
+
+```bash
+# 抓二维码存 PNG
+opencli buyin login --out /tmp/buyin-qr.png
+
+# 抓完后轮询等扫码完成(离开登录页 = 登录态已写入该 Chrome profile)
+opencli buyin login --out /tmp/buyin-qr.png --poll --timeout 180
+
+# 只要 base64(不落盘),给服务/前端消费
+opencli buyin login --out "" --base64 -f json
+```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--out <path>` | `/tmp/buyin-qr.png` | 二维码 PNG 保存路径;留空 `""` 则不落盘 |
+| `--base64` | 关 | 输出 `qr_base64`(`data:image/png;base64,…` URI,前端可直接塞 `<img src>`) |
+| `--poll` | 关 | 抓完后轮询 URL,扫码成功(离开 `/mpa/account/login`)即返回 |
+| `--timeout <秒>` | `180` | `--poll` 的等待上限 |
+| `--scale <n>` | `0` | 截图缩放;`0` = 用页面 devicePixelRatio(Retina 自动 2x) |
+
+#### 输出列(5 个)
+
+| 列 | 含义 |
+|---|---|
+| `status` | `qr_ready`(已出码) / `logged_in`(`--poll` 扫码成功) / `timeout` / `no_qr`(profile 其实已登录) / `blank_qr`(截到了但二维码始终没画出来) / `shot_failed` |
+| `qr_path` | PNG 落盘路径(`--out ""` 时为空) |
+| `qr_base64` | `--base64` 时为 data URI,否则空 |
+| `logged_in` | 是否扫码登录成功(仅 `--poll` 有意义) |
+| `url` | 当前页面 URL |
+
+> ⚠️ 截出的是**那一刻的静态二维码**,抖音二维码有几分钟有效期、扫码状态由 iframe 内部轮询刷新 —— 过期得重抓。做成接口时:返回图给前端 + 同时 `--poll` 判断登录,超时就重抓一张。
+>
+> 给 Node 服务消费(buyin-service「重新登录」闭环):
+> ```js
+> import { execFileSync } from 'node:child_process';
+> const out = execFileSync('opencli',
+>   ['buyin', 'login', '--out', '', '--base64', '-f', 'json'],
+>   { env: { ...process.env, OPENCLI_PROFILE: '<profile>' }, encoding: 'utf8' });
+> const dataUri = JSON.parse(out)[0].qr_base64; // <img src> 直接可用
+> ```
+
 ## 字段约定
 
 - **金额单位**:API 返回的 `price.origin` 和 `cos_fee.origin` 都是**分**,adapter 已转换成**元**
@@ -155,6 +200,7 @@ opencli-buyin/
 │   └── browser-fetch.js     # 同源 fetch 工具(借浏览器签名)
 ├── products.js              # 商品列表 + 批量详情(INTERCEPT)
 ├── categories.js            # 类目树(COOKIE)
+├── login.js                 # 扫码登录二维码(UI / CDP 裁剪截图)
 ├── opencli-plugin.json      # 插件元信息
 └── package.json
 ```
@@ -170,6 +216,9 @@ opencli-buyin/
 3. **session token 两阶段**
    - `material_list` 响应里的 `data.extra.search_id` / `session_id` / `data.log_id` 是详情接口的鉴权前提
    - 批量循环里每 ~25 条主动 SPA 回列表刷一次 token,规避 5~30 分钟的 session 过期
+4. **登录二维码靠 CDP 裁剪截图**(`login.js`)
+   - 二维码在 `open.douyin.com` 跨域 iframe 里,扩展 content script 注入不进去、读不到 DOM
+   - 改用 `page.cdp('Page.captureScreenshot', { clip })` 让 Chrome 原生只截二维码那一块;坐标每次现量,换屏不裁偏
 
 ## License
 

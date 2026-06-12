@@ -16,6 +16,7 @@
 |---|---|---|---|
 | `products.js` | `opencli buyin products` | INTERCEPT(批量两阶段) | 选品库商品列表**默认带完整详情**(逐条 pack_detail,慢) |
 | `categories.js` | `opencli buyin categories` | COOKIE | 拉选品库类目树(3 层) |
+| `login.js` | `opencli buyin login` | UI(CDP 裁剪截图) | 抓扫码登录二维码存 PNG;`--poll` 轮询等扫码完成 |
 
 ## 关键架构决策
 
@@ -124,6 +125,38 @@ await page.waitForCapture(10);
 
 工具函数都在每个 .js 文件底部:`fenToYuan` / `round1` / `parseRatio` / `joinCategory`。
 
+### 4.5 `login.js` 二维码抓取(跨域 iframe + CDP 裁剪)
+
+登录 URL:`https://buyin.jinritemai.com/mpa/account/login?log_out=1&type=24`(`type=24` 是扫码登录 tab)。
+
+**为什么读不到二维码 DOM,只能截图**:二维码是 `<img class="qr-image" src="data:image/png;base64,…">`,
+但它在 `open.douyin.com/qrconnect` 的**跨域 iframe** 里。Browser Bridge 是 Chrome 扩展 content script,
+host 权限不含 `open.douyin.com` → 注入不进那个 frame,`page.frames()` / `evaluateInFrame` 都枚举不到它
+(只列出百应自家两个 `__JSBridgeIframe__` about:blank),`iframe.contentDocument` 也是 `null`(同源策略)。
+DevTools 能看到是因为走 CDP/浏览器层、不受扩展注入限制。所以经 opencli 这条路,**截图捕像素是唯一办法**。
+
+**关键技巧 —— 不写死坐标 + CDP 原生裁剪**:
+- 坐标随屏幕大小/缩放/Retina 变,所以每次用 `page.evaluate` 现量 `getBoundingClientRect()` + `window.scrollX/Y`
+  + `devicePixelRatio`,转成**文档坐标**。
+- 用 `page.cdp('Page.captureScreenshot', { clip: {x,y,width,height,scale} })` 让 **Chrome 原生只截那一块**:
+  clip 用 CSS 像素、`scale` 控分辨率(传 `dpr` 拿原生清晰度)。**不引图像库、不手算 DPR、不解码 PNG**。
+  失败兜底退回整页 `page.screenshot()`(不裁,至少有图)。
+- `strategy: Strategy.UI`(纯浏览器交互,不做 API 拦截/登录态假设 —— 本命令就是登录前用的;
+  框架没有登录 gate,只有 `browserFetch` 会按错误码抛 AuthRequired,login 不走它)。
+- `--poll`:保活页面、轮询当前 URL,离开 `/mpa/account/login` = 扫码成功(登录态 cookie 已落到该 profile),
+  给 buyin-service 做「重新登录」闭环。
+  ⚠️ poll 循环里**必须用 live URL(每次真发 `evaluate('() => location.href')`)**,不能用
+  `getCurrentUrl()` —— 后者命中 `goto` 时缓存的 `_lastUrl`,永远返回登录页 URL,既检测不到登录成功,
+  又因为 poll 循环一条命令都不发扩展、adapter tab 的 **~30s idle 计时器**会把窗口关掉(「窗口只活 30s」根因)。
+  这条 evaluate 一举两得:拿真实 URL + 当心跳保活页面(`page.wait({time})` 是纯 Node setTimeout,不碰扩展)。
+- **base64-first 默认**:`--out` 默认 `""`(**不落盘**)、`--base64` 默认**开** —— 服务端直接消费
+  `qr_base64`(`data:image/png;base64,…` URI),不读文件、无落盘竞态。要 PNG 文件再显式传 `--out <path>`。
+  配 `-f json` 给 buyin-service:`row.qr_base64` 已验证可往返解回合法 PNG;`QR_READY` 信号也带 `base64`。
+
+⚠️ 截出的是**那一刻的静态二维码**,**抖音二维码寿命约 5 分钟**,扫码状态由 iframe 内部轮询刷新 ——
+过期得重抓。所以 `--refresh_every` 默认 **240s**(< 300s):poll 期间每张码到期前必已换新、再打一条
+`QR_READY`,长 poll 也不留死码。做成接口:首张码 + 后续刷新码都经 `QR_READY`(stderr)推前端,`--poll` 判登录闭环。
+
 ### 5. `_shared/browser-fetch.js`
 
 把"在同源页面里 evaluate fetch"封装成一个 helper,自动处理:
@@ -228,6 +261,7 @@ opencli-buyin/
 │   └── browser-fetch.js     # 同源 fetch + 错误处理
 ├── products.js              # INTERCEPT 商品列表(默认带批量详情,见 §3.5)
 ├── categories.js            # COOKIE 类目树
+├── login.js                 # UI 扫码登录二维码抓取(CDP 裁剪截图,见 §4.5)
 ├── opencli-plugin.json      # 插件 manifest(name/version/opencli range)
 ├── package.json             # peerDep: @jackwener/opencli
 ├── README.md                # 用户文档
