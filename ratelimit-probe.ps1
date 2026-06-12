@@ -26,7 +26,14 @@ $ErrorActionPreference = 'Continue'
 $ProfileId = if ($env:OPENCLI_PROFILE) { $env:OPENCLI_PROFILE } else { '7jgudy3t' }
 $Limit     = if ($env:PROBE_LIMIT)     { [int]$env:PROBE_LIMIT } else { 3 }
 $TimeoutS  = if ($env:PROBE_TIMEOUT)   { [int]$env:PROBE_TIMEOUT } else { 300 }
-$LogDir    = if ($env:PROBE_LOG_DIR)   { $env:PROBE_LOG_DIR } else { Join-Path $env:USERPROFILE 'selection-ratelimit-probe' }
+$LogDir    = if ($env:PROBE_LOG_DIR)   { $env:PROBE_LOG_DIR } else { 'D:\probe-logs\selection-ratelimit-probe' }
+
+# Auto-stop: when rate-limited, disable this probe's scheduled task so we stop hammering the account.
+# $TaskName is set by register-probe-task.ps1 (empty on manual runs -> never touches any task).
+# Hard signals (captcha/auth) stop immediately; soft signals (empty/partial) stop after
+# $StopAfter consecutive non-ok runs (default 2, guards against a single flaky run).
+$ProbeTaskName = $env:PROBE_TASK_NAME
+$StopAfter     = if ($env:PROBE_STOP_AFTER) { [int]$env:PROBE_STOP_AFTER } else { 2 }
 
 # opencli is a Node CLI shim (opencli.cmd / extensionless shell script), NOT a Win32 .exe.
 # Launching it directly via Start-Process fails with "%1 is not a valid Win32 application".
@@ -110,3 +117,29 @@ if ($errText) {
 # ---- append CSV + console echo ----
 "$ts,$Limit,$got,$duration,$exitCode,$verdict,$note" | Add-Content -Path $Csv -Encoding utf8
 Write-Host "[$ts] requested=$Limit got=$got ${duration}s exit=$exitCode -> $verdict"
+
+# ---- auto-stop on rate-limit ----
+# A run counts as "limited" if it's a throttle/risk signal (not ok, not a generic tool error).
+function Test-Limited([string]$v) { return ($v -match '^(empty|partial|captcha|auth)') }
+
+if ($ProbeTaskName) {
+  $hardStop = ($verdict -match '^(captcha|auth)')   # risk control / login lost -> stop immediately
+  $softStop = $false
+  if ((Test-Limited $verdict) -and (-not $hardStop)) {
+    # need $StopAfter consecutive limited runs (including this one) to stop
+    try {
+      $recent = @(Import-Csv $Csv | Select-Object -Last $StopAfter)
+      if ($recent.Count -ge $StopAfter -and -not ($recent | Where-Object { -not (Test-Limited $_.verdict) })) {
+        $softStop = $true
+      }
+    } catch { }
+  }
+  if ($hardStop -or $softStop) {
+    try {
+      Disable-ScheduledTask -TaskName $ProbeTaskName -ErrorAction Stop | Out-Null
+      Write-Host "RATE-LIMITED ($verdict) -> disabled scheduled task '$ProbeTaskName'. Re-enable: Enable-ScheduledTask -TaskName $ProbeTaskName"
+    } catch {
+      Write-Host "WARN: rate-limited but failed to disable task '$ProbeTaskName': $_"
+    }
+  }
+}
