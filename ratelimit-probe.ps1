@@ -16,24 +16,28 @@
   Must run in an interactive, logged-in desktop session (Chrome + Browser Bridge
   extension + daemon all need to be live).
 
-  Manual run:  powershell -NoProfile -ExecutionPolicy Bypass -File .\ratelimit-probe.ps1
-  Env overrides: OPENCLI_PROFILE / PROBE_LIMIT / PROBE_TIMEOUT / OPENCLI_BIN / PROBE_LOG_DIR
+  Manual run (params win; each param falls back to its env var, then a default):
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\ratelimit-probe.ps1 -ProfileId <id> [-Limit 3] [-LogDir D:\...]
+  Env overrides still work: OPENCLI_PROFILE / PROBE_LIMIT / PROBE_TIMEOUT / OPENCLI_BIN / PROBE_LOG_DIR /
+                            PROBE_TASK_NAME / PROBE_STOP_AFTER
 #>
+
+param(
+  [string]$ProfileId = $(if ($env:OPENCLI_PROFILE) { $env:OPENCLI_PROFILE } else { '7jgudy3t' }),
+  [int]   $Limit     = $(if ($env:PROBE_LIMIT)     { [int]$env:PROBE_LIMIT }   else { 3 }),
+  [int]   $TimeoutS  = $(if ($env:PROBE_TIMEOUT)   { [int]$env:PROBE_TIMEOUT } else { 300 }),
+  [string]$LogDir    = $(if ($env:PROBE_LOG_DIR)   { $env:PROBE_LOG_DIR }      else { 'D:\probe-logs\selection-ratelimit-probe' }),
+  [string]$TaskName  = $env:PROBE_TASK_NAME,   # which scheduled task to auto-disable; empty on ad-hoc runs
+  [int]   $StopAfter = $(if ($env:PROBE_STOP_AFTER) { [int]$env:PROBE_STOP_AFTER } else { 2 })
+)
 
 $ErrorActionPreference = 'Continue'
 
-# ---- tunables (env wins) ----
-$ProfileId = if ($env:OPENCLI_PROFILE) { $env:OPENCLI_PROFILE } else { '7jgudy3t' }
-$Limit     = if ($env:PROBE_LIMIT)     { [int]$env:PROBE_LIMIT } else { 3 }
-$TimeoutS  = if ($env:PROBE_TIMEOUT)   { [int]$env:PROBE_TIMEOUT } else { 300 }
-$LogDir    = if ($env:PROBE_LOG_DIR)   { $env:PROBE_LOG_DIR } else { 'D:\probe-logs\selection-ratelimit-probe' }
-
-# Auto-stop: when rate-limited, disable this probe's scheduled task so we stop hammering the account.
-# $TaskName is set by register-probe-task.ps1 (empty on manual runs -> never touches any task).
+# Auto-stop target: $TaskName comes from -TaskName / $env:PROBE_TASK_NAME (set by
+# register-probe-task.ps1). Empty on ad-hoc manual runs -> auto-stop never touches any task.
 # Hard signals (captcha/auth) stop immediately; soft signals (empty/partial) stop after
-# $StopAfter consecutive non-ok runs (default 2, guards against a single flaky run).
-$ProbeTaskName = $env:PROBE_TASK_NAME
-$StopAfter     = if ($env:PROBE_STOP_AFTER) { [int]$env:PROBE_STOP_AFTER } else { 2 }
+# $StopAfter consecutive limited runs (default 2, guards against a single flaky run).
+$ProbeTaskName = $TaskName
 
 # opencli is a Node CLI shim (opencli.cmd / extensionless shell script), NOT a Win32 .exe.
 # Launching it directly via Start-Process fails with "%1 is not a valid Win32 application".
