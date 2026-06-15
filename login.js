@@ -21,16 +21,16 @@ import { writeFileSync } from 'node:fs';
  *
  * 「进程不退出才能扫码」与「同时把码推走」如何兼顾:
  *   二维码 token 绑在这张 live 页面的 iframe 上,页面一关 iframe 就停止轮询
- *   check_qrconnect,扫了也不触发登录。所以扫码期间命令必须**用 --poll 阻塞着保活页面**。
- *   而码本身在进 poll 循环**之前**就已经:① 写盘 --out ② 往 stderr 打一行
+ *   check_qrconnect,扫了也不触发登录。所以扫码期间命令**默认阻塞着保活页面**。
+ *   而码本身在进保活循环**之前**就已经:① 写盘 --out ② 往 stderr 打一行
  *   `QR_READY {json}`(机读信号)。父进程后台跑本命令 + 监听 stderr/读文件,就能在
  *   进程不退出的同时立刻拿到码推到服务器。见 README「扫码登录二维码」。
  *
  * 默认 base64-first:--out 默认 ""(不落盘)、--base64 默认开 —— 服务端直接消费 data URI,
  *   不读文件、无落盘竞态。要文件再显式传 --out <path>。
  *
- * --poll:轮询 URL,离开 /mpa/account/login 即视为扫码成功(登录态 cookie 已落到该 profile)。
- * --refresh_every:poll 期间每 N 秒重抓最新码(覆盖 --out 若有)并再打一条 QR_READY,抗过期。
+ * 保活:轮询 URL,离开 /mpa/account/login 即视为扫码成功(登录态 cookie 已落到该 profile)。
+ * --refresh_every:保活期间每 N 秒重抓最新码(覆盖 --out 若有)并再打一条 QR_READY,抗过期。
  *   抖音二维码寿命约 **5 分钟**,所以默认 240s < 300s:每张码到期前必已换新,长 poll 也不留死码。
  */
 
@@ -43,18 +43,17 @@ cli({
   name: 'login',
   access: 'read',
   description:
-    '抓百应扫码登录二维码(CDP 裁剪截图);--poll 保活页面等扫码,stderr 打 QR_READY 信号',
+    '抓百应扫码登录二维码(CDP 裁剪截图);默认保活页面等扫码,stderr 打 QR_READY 信号',
   domain: 'buyin.jinritemai.com',
   strategy: Strategy.UI, // 纯浏览器交互,不做 API 拦截/登录态假设(本命令就是登录前用的)
   args: [
     { name: 'out', default: '', help: '二维码 PNG 保存路径;默认 ""(不落盘,只走 base64)。需要文件才传路径' },
     { name: 'base64', type: 'bool', default: true, help: '输出 qr_base64(data:image/png;base64 URI,也带进 QR_READY 信号);默认开,服务端直接消费' },
-    { name: 'poll', type: 'bool', default: true, help: '抓完后保活页面、轮询等扫码登录成功' },
-    { name: 'timeout', type: 'int', default: 600, help: '--poll 等待上限(秒);抖音二维码寿命约 5 分钟,配 --refresh_every 跨多张码续命' },
-    { name: 'refresh_every', type: 'int', default: 240, help: 'poll 期间每 N 秒重抓最新二维码并再打一条 QR_READY(抗 5 分钟过期;0=关)。默认 240 < 300 保证每张码到期前已换新' },
+    { name: 'timeout', type: 'int', default: 600, help: '保活页面等待扫码上限(秒);抖音二维码寿命约 5 分钟,配 --refresh_every 跨多张码续命' },
+    { name: 'refresh_every', type: 'int', default: 240, help: '保活期间每 N 秒重抓最新二维码并再打一条 QR_READY(抗 5 分钟过期;0=关)。默认 240 < 300 保证每张码到期前已换新' },
     { name: 'scale', type: 'int', default: 0, help: '截图渲染倍数(0=默认 dpr×2,Retina≈4x;调高更清晰但体积更大)' },
   ],
-  columns: ['status', 'qr_path', 'qr_base64', 'logged_in', 'url'],
+  columns: ['status', 'qr_base64'],
   func: async (page, args) => {
     const sleep = (secs) => page.wait({ time: secs }); // 纯 setTimeout(见 products.js 注释)
 
@@ -62,19 +61,19 @@ cli({
 
     // ── 首次抓码:等 iframe 出现 + 二维码真的画出来 ──
     const first = await captureQR(page, args, sleep, 20);
-    if (first.status === 'no_qr') {
-      // iframe 没出现:多半是这个 profile 其实已登录、直接跳走了
-      return [row('no_qr', args, '', false, await currentUrl(page))];
+    if (first.status !== 'ok') {
+      // 没拿到可扫的码:若页面已离开登录页 = 这个 profile 本来就登录着,算成功;
+      // 否则(还在登录页却抓不到码:截图失败 / 只截到空白卡)才是真抓码失败
+      const u = await liveUrl(page);
+      const already = u && !/\/mpa\/account\/login/.test(u) && !/^about:blank/.test(u);
+      return [row(already ? 'logged_in' : 'no_qr', '')];
     }
-    if (first.status === 'shot_failed') {
-      return [row('shot_failed', args, '', false, await currentUrl(page))];
-    }
-    let b64 = first.b64; // blank_qr 时也有图(尽力而为的最后一张),但状态会如实标出
+    let b64 = first.b64;
 
-    // ── --poll:阻塞保活页面,等扫码完成;可选定时重抓最新码 ──
+    // ── 阻塞保活页面,等扫码完成;可选定时重抓最新码(始终执行) ──
     let loggedIn = false;
     let url = await currentUrl(page);
-    if (args.poll) {
+    {
       const deadline = Date.now() + Math.max(1, Number(args.timeout) || 180) * 1000;
       const refreshEvery = Math.max(0, Number(args.refresh_every) || 0);
       let nextRefresh = refreshEvery > 0 ? Date.now() + refreshEvery * 1000 : Infinity;
@@ -82,7 +81,7 @@ cli({
         await sleep(3);
         // 必须用 liveUrl(每次真发 evaluate),不能用 currentUrl/getCurrentUrl:
         //   ① getCurrentUrl 命中 goto 时缓存的 _lastUrl,永远返回登录页 URL → 检测不到登录成功
-        //   ② page.wait({time}) 是纯 Node setTimeout,不碰扩展;若 poll 期间一条命令都不发,
+        //   ② page.wait({time}) 是纯 Node setTimeout,不碰扩展;若保活期间一条命令都不发,
         //      adapter tab 的 ~30s idle 计时器会把窗口关掉(就是「窗口只存活 30s」的根因)。
         //   这条 evaluate 一举两得:拿真实 URL + 当心跳重置扩展 idle 计时器保活页面。
         url = await liveUrl(page);
@@ -98,8 +97,7 @@ cli({
       }
     }
 
-    const okStatus = first.status === 'blank_qr' ? 'blank_qr' : 'qr_ready';
-    return [row(loggedIn ? 'logged_in' : args.poll ? 'timeout' : okStatus, args, b64, loggedIn, url)];
+    return [row(loggedIn ? 'logged_in' : 'timeout', b64)];
   },
 });
 
@@ -131,7 +129,8 @@ async function measureRect(page, attempts, sleep) {
 const MIN_QR_BPP = 0.04; // 落在空白(0.01)和真码(0.2)之间,4× 余量
 
 // 量位置 → 反复截到「非空白」为止 → 写盘 → 打 QR_READY。
-// 返回 { status: 'no_qr'|'shot_failed'|'blank_qr'|'ok', b64 }
+// 返回 { status: 'ok'|'no_qr', b64 }:只要没拿到「画出来的真码」(iframe 缺失 / 截图失败 /
+// 只截到空白卡)一律按 'no_qr' 统一上报;'ok' 才是可扫的码。
 async function captureQR(page, args, sleep, iframeAttempts) {
   const rect = await measureRect(page, iframeAttempts, sleep);
   if (!rect) return { status: 'no_qr', b64: null };
@@ -151,11 +150,11 @@ async function captureQR(page, args, sleep, iframeAttempts) {
     await sleep(1); // 还是空白(或截图抖动),等 1s 再截
   }
 
-  const b64 = good || last;
-  if (!b64) return { status: 'shot_failed', b64: null };
-  if (args.out) writeFileSync(args.out, Buffer.from(b64, 'base64')); // out 留空则不落盘
-  emitReady(args, b64);
-  return { status: good ? 'ok' : 'blank_qr', b64 };
+  // 没截到、或只截到空白卡 —— 都按抓码失败处理(空白码也扫不了),统一 'no_qr'
+  if (!good) return { status: 'no_qr', b64: null };
+  if (args.out) writeFileSync(args.out, Buffer.from(good, 'base64')); // out 留空则不落盘
+  emitReady(args, good);
+  return { status: 'ok', b64: good };
 }
 
 // 机读信号:截好码的瞬间往 stderr 打一行,父进程不用轮询文件就知道码已就绪。
@@ -175,13 +174,10 @@ function emitReady(args, b64) {
 }
 
 // 统一组装输出行
-function row(status, args, b64, loggedIn, url) {
+function row(status, b64) {
   return {
     status,
-    qr_path: args.out || '',
-    qr_base64: args.base64 && b64 ? `data:image/png;base64,${b64}` : '',
-    logged_in: loggedIn,
-    url,
+    qr_base64: b64 ? `data:image/png;base64,${b64}` : '',
   };
 }
 
