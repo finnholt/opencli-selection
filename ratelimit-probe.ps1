@@ -35,8 +35,7 @@ $ErrorActionPreference = 'Continue'
 
 # Auto-stop target: $TaskName comes from -TaskName / $env:PROBE_TASK_NAME (set by
 # register-probe-task.ps1). Empty on ad-hoc manual runs -> auto-stop never touches any task.
-# Hard signals (captcha/auth) stop immediately; soft signals (empty/partial) stop after
-# $StopAfter consecutive limited runs (default 2, guards against a single flaky run).
+# Stops after $StopAfter consecutive "limited" runs (got < requested), default 2 (guards a flaky run).
 $ProbeTaskName = $TaskName
 
 # opencli is a Node CLI shim (opencli.cmd / extensionless shell script), NOT a Win32 .exe.
@@ -59,28 +58,37 @@ if (-not (Test-Path $Csv)) {
   'ts,requested,got,duration_s,exit_code,verdict,note' | Out-File -FilePath $Csv -Encoding utf8
 }
 
-# ---- run once (with timeout, stdout/stderr redirected separately) ----
+# ---- run once (System.Diagnostics.Process: reliable ExitCode + timeout; async read avoids pipe deadlock) ----
+# NOTE: Start-Process -PassThru + redirect has a known bug where .ExitCode returns $null, which made
+# every run misclassify as error(exit=). Use .NET Process directly so ExitCode is always captured.
 $env:OPENCLI_PROFILE = $ProfileId
-# cmd.exe /c <opencli> selection products ... -- cmd.exe IS a valid Win32 app and resolves the .cmd
-$cmdArgs = @('/c', $Invoke, 'selection', 'products', '--limit', "$Limit", '-f', 'json')
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName               = $env:ComSpec    # cmd.exe -- valid Win32 app, resolves opencli.cmd on PATH
+$psi.Arguments              = "/c $Invoke selection products --limit $Limit -f json"
+$psi.RedirectStandardOutput = $true
+$psi.RedirectStandardError  = $true
+$psi.UseShellExecute        = $false
+$psi.CreateNoWindow         = $true
 
 $start = Get-Date
-$proc = Start-Process -FilePath $env:ComSpec -ArgumentList $cmdArgs `
-  -RedirectStandardOutput $rawOut -RedirectStandardError $rawErr `
-  -NoNewWindow -PassThru
-
-if (-not $proc.WaitForExit($TimeoutS * 1000)) {
-  try { $proc.Kill() } catch {}
-  $exitCode = 124   # timeout, same convention as GNU timeout
+$p = [System.Diagnostics.Process]::Start($psi)
+$outTask = $p.StandardOutput.ReadToEndAsync()   # read async so a full pipe buffer can't deadlock the child
+$errTask = $p.StandardError.ReadToEndAsync()
+if (-not $p.WaitForExit($TimeoutS * 1000)) {
+  try { $p.Kill() } catch {}
+  $exitCode = 124                               # timeout (GNU timeout convention)
 } else {
-  $exitCode = $proc.ExitCode
+  $exitCode = $p.ExitCode
 }
 $duration = [int]((Get-Date) - $start).TotalSeconds
 
-# ---- parse result ----
+$outText = $outTask.Result
+$errText = $errTask.Result
+Set-Content -Path $rawOut -Value $outText -Encoding utf8
+Set-Content -Path $rawErr -Value $errText -Encoding utf8
+
+# ---- parse result: how many items came back with detail_ok=true ----
 $got = 0
-$outText = ''
-if (Test-Path $rawOut) { $outText = Get-Content -Raw -Encoding utf8 $rawOut }
 try {
   $json = $outText | ConvertFrom-Json
   if ($json -is [System.Array]) {
@@ -89,23 +97,18 @@ try {
     $got = 1
   }
 } catch {
-  # not valid JSON (likely whole batch failed): fall back to counting the marker
   $got = ([regex]::Matches($outText, '"detail_ok":true')).Count
 }
 
-$errText = ''
-if (Test-Path $rawErr) { $errText = Get-Content -Raw -Encoding utf8 $rawErr }
-$blob = "$outText`n$errText"
-
-# Classify. The masked page error "network unstable" usually shows up as got=0 here,
-# so we lean on the count + a few ASCII markers rather than matching Chinese text.
-$verdict = ''
-if     ($blob -match 'AuthRequired|not.?login|-1025|relogin|re-login') { $verdict = 'auth(login_lost)' }
-elseif ($blob -match 'captcha|verify|slider|risk')                     { $verdict = 'captcha(risk)' }
-elseif ($exitCode -ne 0) { $verdict = "error(exit=$exitCode)" }
-elseif ($got -eq 0)      { $verdict = 'empty(all_dropped)' }
-elseif ($got -lt $Limit) { $verdict = "partial($got/$Limit)" }
-else                     { $verdict = 'ok' }
+# ---- classify: COUNT-BASED ONLY (do NOT keyword-scan the payload) ----
+# The success payload legitimately contains words like "risk" (product_risk_tip) and "login",
+# so the old keyword scan produced false captcha/auth verdicts that wrongly auto-disabled the task.
+# got is the reliable signal:
+#   got >= limit -> ok   |   got == 0 -> blocked (or crashed, if exit!=0)   |   else partial
+$verdict =
+  if     ($got -ge $Limit) { 'ok' }
+  elseif ($got -eq 0)      { if ($exitCode -ne 0) { "error(exit=$exitCode)" } else { 'empty(all_dropped)' } }
+  else                     { "partial($got/$Limit)" }
 
 # last non-empty stderr line as note (strip commas/newlines, cap 120 chars)
 $note = ''
@@ -123,22 +126,21 @@ if ($errText) {
 Write-Host "[$ts] requested=$Limit got=$got ${duration}s exit=$exitCode -> $verdict"
 
 # ---- auto-stop on rate-limit ----
-# A run counts as "limited" if it's a throttle/risk signal (not ok, not a generic tool error).
-function Test-Limited([string]$v) { return ($v -match '^(empty|partial|captcha|auth)') }
+# A run is "limited" (rate-limit signal) when it returned fewer items than requested.
+function Test-Limited([string]$v) { return ($v -match '^(empty|partial)') }
 
 if ($ProbeTaskName) {
-  $hardStop = ($verdict -match '^(captcha|auth)')   # risk control / login lost -> stop immediately
-  $softStop = $false
-  if ((Test-Limited $verdict) -and (-not $hardStop)) {
+  $shouldStop = $false
+  if (Test-Limited $verdict) {
     # need $StopAfter consecutive limited runs (including this one) to stop
     try {
       $recent = @(Import-Csv $Csv | Select-Object -Last $StopAfter)
       if ($recent.Count -ge $StopAfter -and -not ($recent | Where-Object { -not (Test-Limited $_.verdict) })) {
-        $softStop = $true
+        $shouldStop = $true
       }
     } catch { }
   }
-  if ($hardStop -or $softStop) {
+  if ($shouldStop) {
     try {
       Disable-ScheduledTask -TaskName $ProbeTaskName -ErrorAction Stop | Out-Null
       Write-Host "RATE-LIMITED ($verdict) -> disabled scheduled task '$ProbeTaskName'. Re-enable: Enable-ScheduledTask -TaskName $ProbeTaskName"
