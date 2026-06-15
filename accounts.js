@@ -56,8 +56,6 @@ cli({
       if (acct && acct.email) break;
       await page.wait({ time: 1 }); // 纯 setTimeout 等 1s 再试
     }
-
-    if (!acct || !acct.email) return []; // 未登录 / 读不到 -> 空,runner 标 no_account
-    return [{ email: acct.email, name: acct.name || '', primary: true, valid: true }];
+    return { email: acct?.email || '' , name: acct?.name || ''};
   },
 });
