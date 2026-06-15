@@ -69,6 +69,11 @@ $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError  = $true
 $psi.UseShellExecute        = $false
 $psi.CreateNoWindow         = $true
+# opencli (Node) emits UTF-8. Without these, .NET decodes the child's bytes using the
+# console ANSI codepage (GBK/936 on zh-CN) -> Chinese product names become mojibake (luanma)
+# in raw\*.json, the CSV note column, and break ConvertFrom-Json. Force UTF-8 decode.
+$psi.StandardOutputEncoding = New-Object System.Text.UTF8Encoding $false
+$psi.StandardErrorEncoding  = New-Object System.Text.UTF8Encoding $false
 
 $start = Get-Date
 $p = [System.Diagnostics.Process]::Start($psi)
